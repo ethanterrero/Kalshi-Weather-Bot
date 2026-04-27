@@ -46,3 +46,58 @@ The polymarket bot has no "what's fair value" component because arb's fair value
 - 1 test passing.
 - Branch: `main` (no PR — initial commit).
 
+---
+
+## 2026-04-26 (evening) — Backlog item 1: Kalshi market scanner
+
+### What we did
+Closed the scanner half of backlog item 1: `KalshiClient` (paginating, rate-limit-aware) + a `WeatherThreshold` parser pinned to real Kalshi tickers. End-to-end run against demo-api.kalshi.co pulls 22 open KXHIGH/KXLOW markets across 10 configured series.
+
+### Scope decision: monitor folded into scanner for v1
+The day-0 architecture had `weather-scanner` (discovery) and `weather-monitor` (orderbook polling) as separate crates, mirroring the polymarket bot's split. After looking at Kalshi's actual API: the cheapest way to read prices for N markets is `GET /markets?series_ticker=X` — the same endpoint the scanner already calls — and it returns `yes_bid_dollars` / `yes_ask_dollars` / `last_price_dollars` alongside the metadata. Hitting `/markets/{ticker}` per market is N times more requests for the same data, and Kalshi's rate limits make that a non-starter for >50 markets. So for v1 there's no separate "monitor" — the scanner runs on the `monitor.poll_interval_ms` cadence and doubles as the price feed.
+
+If we ever want sub-poll-interval price latency, the right answer is the Kalshi WebSocket (`/trade-api/ws/v2`) with `orderbook_delta` subscriptions, not REST polling per ticker. That's deferred. The `weather-monitor` crate stays as a placeholder so v2 has somewhere to land.
+
+### Pinning against real Kalshi data first
+Before writing any deserializers I curl'd demo-api with `?series_ticker=KXHIGHNY` and inspected the live response. Same discipline as the polymarket bot's "deserializes_real_gamma_field_names" test — synthetic JSON written to match a struct will pass against itself even when the struct is wrong. Two things only the live data revealed:
+
+1. **Prices are JSON strings, not numbers**: `"yes_ask_dollars": "0.4500"`. Deserializer uses `rust_decimal::serde::str_option` to handle this.
+2. **`series_ticker` isn't on the market response** — only `event_ticker`. We derive it by stripping the date suffix off `event_ticker` (`KXHIGHNY-26APR27` → `KXHIGHNY`).
+
+### Real ticker grammar (also pinned, not invented)
+- `KX{HIGH|LOW}{CITY}-{YYMMDD}-T{N}` + `strike_type=greater` → high/low ≥ N+1°F. Kalshi's "T69 + greater" reads as "high > 69" and integer-rounds to ≥ 70.
+- `...-T{N}` + `strike_type=less` → ≤ N-1°F.
+- `...-B{n}.5` + `strike_type=between` → bin market (e.g. "high between 64° and 65°"). v1 silently skips these — the simple Normal-CDF model wants one-sided thresholds; bins want a different formulation. Stretch.
+- Date format: `YY{JAN|FEB|...|DEC}{DD}` — two-digit year, three-letter uppercase month, two-digit day.
+
+### Rate-limit handling
+The first end-to-end smoke run dropped 5 of 10 series fetches to demo-api 429s. The free demo tier rate-limits at roughly 5 RPS; bursting 10 parallel-ish series fetches at startup easily trips it. `KalshiClient::get_with_retry` does exponential backoff (250ms → 500ms → 1s → 2s, total ≤3.75s) on 429 and 503. Re-run picks up all 22 markets cleanly.
+
+### What changed
+- `crates/weather-scanner/src/lib.rs` — `KalshiClient`, `MarketScanner`, `RawMarket` deserializer, `parse_weather_threshold`, `parse_kalshi_date`, retry loop. ~250 lines including tests.
+- `crates/weather-bot/src/main.rs` — initial scan + periodic refresh task; bot now stays alive on ctrl+C instead of exiting after the "starting" log.
+- `config/default.toml` + `crates/weather-config/src/lib.rs` — replaced the placeholder `series_prefixes` with `series_tickers` listing 10 real series (5 cities × 2 stats). Kalshi's `?series_ticker=` filter requires exact match, not a prefix.
+
+### Tests (+9, total now 10)
+- 1 fixture-deser test pinning the wire format (catches Kalshi renaming a `_dollars`/`_fp` field).
+- 1 `into_market` test for series-ticker derivation + UTC resolution date.
+- 5 ticker-parser tests: T-greater, T-less, KXLOW series, between-bin rejection, custom-strike rejection, non-weather-series rejection.
+- 1 date-format test (valid + bad month + too-short).
+- 1 `#[ignore]`'d live smoke test (`cargo test -p weather-scanner -- --ignored`) that hits demo-api directly. Useful for catching wire-format drift without coupling CI to network.
+
+### State after today
+- `cargo test --workspace` clean; 10 tests passing.
+- `cargo run -p weather-bot` runs against demo-api, scans 22 markets, idles on a 5s refresh loop until ctrl+C.
+- Two commits: `feat(scanner): ...` and `feat(bot): wire scanner into main + retry on Kalshi 429s`.
+
+### What's next (revised)
+Original devlog item 1 was scanner + monitor; monitor folded into scanner per the decision above. So the new item 1 is done. The list shifts up:
+
+1. **City code → (lat, lon) mapping.** The threshold parser populates `WeatherThreshold.city` with Kalshi's code ("NY", "CHI", "LAX", ...). The forecast layer needs lat/lon. Small static table; lives in either `weather-types` or a new `weather-locations` module.
+2. **Pricing model (`weather-pricing`).** `forecast: Forecast`, `threshold: WeatherThreshold` → `Decimal` model probability. v1: pick the right `ForecastPeriod` (matching `threshold.date` + day/night), apply `Phi((forecast_temp − temp_f) / sigma)` where `sigma` is horizon-indexed.
+3. **Strategy + signal generation (`weather-strategy`).**
+4. **Risk manager (`weather-risk`).**
+5. **Kalshi RSA auth + executor (`weather-executor`).** Demo env first.
+6. **Bot main loop wiring everything.** Today's main loop runs the scanner; needs forecast + pricing + strategy + risk + executor stitched in.
+7. **Paper-trade for a week.**
+

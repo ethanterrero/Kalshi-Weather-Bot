@@ -2519,7 +2519,10 @@ dependencies = [
 name = "weather-pricing"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "libm",
  "rust_decimal",
+ "thiserror",
  "weather-types",
 ]
 

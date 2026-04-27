@@ -5,4 +5,7 @@ edition = "2021"
 
 [dependencies]
 weather-types = { path = "../weather-types" }
+chrono = { workspace = true }
+libm = "0.2"
 rust_decimal = { workspace = true }
+thiserror = { workspace = true }

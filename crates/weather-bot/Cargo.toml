@@ -1,0 +1,24 @@
+[package]
+name = "weather-bot"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "weather-bot"
+path = "src/main.rs"
+
+[dependencies]
+weather-config = { path = "../weather-config" }
+weather-executor = { path = "../weather-executor" }
+weather-forecast = { path = "../weather-forecast" }
+weather-monitor = { path = "../weather-monitor" }
+weather-pricing = { path = "../weather-pricing" }
+weather-risk = { path = "../weather-risk" }
+weather-scanner = { path = "../weather-scanner" }
+weather-strategy = { path = "../weather-strategy" }
+weather-types = { path = "../weather-types" }
+
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

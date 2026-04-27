@@ -1,0 +1,12 @@
+[package]
+name = "weather-scanner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+weather-config = { path = "../weather-config" }
+weather-types = { path = "../weather-types" }
+reqwest = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

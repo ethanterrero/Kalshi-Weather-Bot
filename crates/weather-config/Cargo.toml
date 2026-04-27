@@ -1,0 +1,11 @@
+[package]
+name = "weather-config"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+config = { workspace = true }
+dotenvy = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

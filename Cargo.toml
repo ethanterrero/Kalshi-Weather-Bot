@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/weather-types",
+    "crates/weather-config",
+    "crates/weather-scanner",
+    "crates/weather-monitor",
+    "crates/weather-forecast",
+    "crates/weather-pricing",
+    "crates/weather-strategy",
+    "crates/weather-risk",
+    "crates/weather-executor",
+    "crates/weather-bot",
+]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal_macros = "1"
+reqwest = { version = "0.12", features = ["json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "2"
+anyhow = "1"
+config = "0.14"
+dotenvy = "0.15"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+url = "2"
+base64 = "0.22"
+rsa = { version = "0.9", features = ["sha2"] }
+sha2 = "0.10"
+rand = "0.8"

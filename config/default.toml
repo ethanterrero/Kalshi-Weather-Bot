@@ -1,0 +1,47 @@
+[kalshi]
+# "demo" → demo-api.kalshi.co (paper-trade), "prod" → trading-api.kalshi.com.
+# Read from KALSHI_ENV env var if set; this is the default fallback.
+env = "demo"
+
+[execution]
+# Explicit opt-in. "live" requires KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY_PATH set
+# and KALSHI_ENV=prod. Default keeps you safe.
+mode = "dry_run"
+
+[forecast]
+# NOAA NWS API base. Public endpoint, no auth, but they ask for a User-Agent.
+nws_base_url = "https://api.weather.gov"
+# Identifier sent in the User-Agent. NWS blocks generic UAs.
+user_agent = "Kalshi-Weather-Bot (set-your-contact@example.com)"
+# How often to refresh forecasts (seconds).
+refresh_interval_secs = 1800
+
+[scanner]
+# How often to refresh the Kalshi market list (seconds).
+refresh_interval_secs = 300
+# Filter: only ingest markets whose ticker series starts with one of these.
+# Kalshi weather contracts use series like "KXHIGH" (daily highs), "KXLOW" (lows),
+# "HIGHNY", "HIGHCHI", etc. Empty = no filter.
+series_prefixes = ["KXHIGH", "KXLOW"]
+
+[strategy]
+# Minimum edge (model probability − market price) to take a position. 5¢ default.
+min_edge = "0.05"
+# Kelly fraction multiplier. 0.25 = "quarter Kelly" — conservative.
+kelly_fraction = "0.25"
+
+[risk]
+# Hard caps. v1 is intentionally tiny — directional weather edges are noisy and
+# Kalshi liquidity is thin. Bump after a few weeks of profitable paper-trading.
+max_position_size_usd = "5.0"
+max_total_exposure_usd = "50.0"
+per_market_cooldown_secs = 60
+max_concurrent_positions = 10
+
+[monitor]
+poll_interval_ms = 5000
+max_concurrent_requests = 5
+
+[logging]
+level = "info"
+json_output = false

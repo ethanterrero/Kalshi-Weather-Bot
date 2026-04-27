@@ -66,17 +66,7 @@ impl KalshiClient {
                 url.push_str("&cursor=");
                 url.push_str(c);
             }
-            let resp = self.http.get(&url).send().await?;
-            let status = resp.status();
-            if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(ScannerError::Status {
-                    status: status.as_u16(),
-                    url,
-                    body,
-                });
-            }
-            let bytes = resp.bytes().await?;
+            let bytes = self.get_with_retry(&url).await?;
             let page: MarketsResponse = serde_json::from_slice(&bytes)?;
             out.extend(page.markets);
             // Kalshi returns a cursor even on the last page; the convention is
@@ -89,6 +79,35 @@ impl KalshiClient {
             }
         }
         Ok(out)
+    }
+
+    /// GET with exponential backoff on 429 / 503. Demo-api rate-limits at
+    /// roughly 5 RPS; bursting 10 series fetches at startup easily trips it.
+    async fn get_with_retry(&self, url: &str) -> Result<bytes::Bytes, ScannerError> {
+        const MAX_ATTEMPTS: u32 = 4;
+        const BASE_DELAY_MS: u64 = 250;
+        for attempt in 0..MAX_ATTEMPTS {
+            let resp = self.http.get(url).send().await?;
+            let status = resp.status();
+            if status.is_success() {
+                return Ok(resp.bytes().await?);
+            }
+            // 429 (rate limit) and 503 (overloaded) are worth retrying;
+            // everything else is a hard failure.
+            let retriable = status.as_u16() == 429 || status.as_u16() == 503;
+            if !retriable || attempt + 1 == MAX_ATTEMPTS {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(ScannerError::Status {
+                    status: status.as_u16(),
+                    url: url.to_string(),
+                    body,
+                });
+            }
+            // 250ms, 500ms, 1s, 2s — total ~3.75s worst case before giving up.
+            let delay = BASE_DELAY_MS * (1u64 << attempt);
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
+        unreachable!("loop returns or errors before exiting normally")
     }
 }
 

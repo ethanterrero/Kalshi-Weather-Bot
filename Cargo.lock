@@ -2537,6 +2537,7 @@ dependencies = [
 name = "weather-scanner"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "chrono",
  "reqwest",
  "rust_decimal",

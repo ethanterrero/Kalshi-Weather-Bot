@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 weather-config = { path = "../weather-config" }
 weather-types = { path = "../weather-types" }
+bytes = "1"
 chrono = { workspace = true }
 reqwest = { workspace = true }
 rust_decimal = { workspace = true }

@@ -11,6 +11,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod cities;
+
 /// A single binary contract listed on Kalshi.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KalshiMarket {

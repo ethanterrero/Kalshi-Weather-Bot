@@ -19,10 +19,16 @@ refresh_interval_secs = 1800
 [scanner]
 # How often to refresh the Kalshi market list (seconds).
 refresh_interval_secs = 300
-# Filter: only ingest markets whose ticker series starts with one of these.
-# Kalshi weather contracts use series like "KXHIGH" (daily highs), "KXLOW" (lows),
-# "HIGHNY", "HIGHCHI", etc. Empty = no filter.
-series_prefixes = ["KXHIGH", "KXLOW"]
+# Full Kalshi series tickers to track. Kalshi's `?series_ticker=` filter
+# requires the exact series, not a prefix, so we list each city × stat
+# combo we care about. Add more cities as v1 expands.
+series_tickers = [
+    "KXHIGHNY", "KXLOWNY",
+    "KXHIGHCHI", "KXLOWCHI",
+    "KXHIGHLAX", "KXLOWLAX",
+    "KXHIGHMIA", "KXLOWMIA",
+    "KXHIGHAUS", "KXLOWAUS",
+]
 
 [strategy]
 # Minimum edge (model probability − market price) to take a position. 5¢ default.

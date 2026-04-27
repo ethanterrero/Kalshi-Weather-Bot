@@ -77,8 +77,10 @@ pub struct ForecastConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScannerConfig {
     pub refresh_interval_secs: u64,
+    /// Full Kalshi series tickers to track (e.g. `KXHIGHNY`, `KXLOWCHI`).
+    /// Kalshi's `?series_ticker=` filter requires exact match, not a prefix.
     #[serde(default)]
-    pub series_prefixes: Vec<String>,
+    pub series_tickers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

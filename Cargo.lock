@@ -2537,9 +2537,13 @@ dependencies = [
 name = "weather-scanner"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "reqwest",
+ "rust_decimal",
  "serde",
+ "serde_json",
  "thiserror",
+ "tokio",
  "tracing",
  "weather-config",
  "weather-types",

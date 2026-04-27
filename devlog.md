@@ -101,3 +101,46 @@ Original devlog item 1 was scanner + monitor; monitor folded into scanner per th
 6. **Bot main loop wiring everything.** Today's main loop runs the scanner; needs forecast + pricing + strategy + risk + executor stitched in.
 7. **Paper-trade for a week.**
 
+---
+
+## 2026-04-26 (late evening) — Backlog items 1 + 2: cities + pricing
+
+### What we did
+Closed the next two backlog items in one branch (`feat/locations-and-pricing`). Items 1 (city → lat/lon) and 2 (pricing) are naturally coupled — a working pricing model needs the cities table to know where to pull forecasts from — so they ship together.
+
+### Cities (commit 1)
+Added `weather-types::cities` with a static `CITIES: &[CityLocation]` table for the 5 v1 cities. Each entry has the Kalshi city code, the human-readable site name (lifted verbatim from Kalshi's `rules_primary` field, fetched from demo-api on 2026-04-26), and the (lat, lon).
+
+The non-obvious finding that justified the "verify against rules_primary" discipline: Kalshi resolves Chicago contracts on **Midway (KMDW)**, not O'Hare (KORD). Using O'Hare's coords would shift the forecast by ~30 km on a market where the spread is often pennies — exactly the kind of silent bias dry-run wouldn't surface.
+
+Saved the rule (verify Kalshi `rules_primary` for any new city before adding it to the table) as a comment in `cities.rs` so the next person to extend it doesn't fall into the same trap.
+
+### Pricing (commit 2)
+`weather-pricing::model_probability(forecast, threshold) -> Result<Decimal, PricingError>`.
+
+Algorithm:
+1. **Period matching:**
+   - DailyHigh on date X → NWS day period whose `start_time` calendar-day equals X.
+   - DailyLow on date X → NWS night period whose `start_time` calendar-day equals **X − 1**. The daily low for X almost always occurs in the early morning of X, which is covered by the NWS "X-1 Night" period (the night that started on X-1 evening). Subtle enough to deserve a dedicated test.
+2. **Horizon-indexed sigma:** `[2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]` °F for horizons 0–6 days. Approximates published NWS verification stats; will be replaced with empirical calibration once the bot has a realised-vs-forecast log.
+3. **Continuity correction:** NWS Climatological Reports — what Kalshi resolves on — round to whole degrees, so the cutoff for the underlying continuous distribution is the half-degree boundary. Without this, a forecast _exactly equal_ to the threshold would price at 0.5; with it, it prices at ≈0.5987 for ≥-direction and the symmetric ≈0.5987 for ≤-direction. Captured by a dedicated test that catches missing or mis-signed half-degree shifts.
+4. **Phi via libm::erf.** Avoided pulling in `statrs` (heavier, mostly unused) for a single function.
+
+Errors fail loud rather than returning a default: `NoMatchingPeriod`, `HorizonTooFar` (>6 days), `HorizonNegative` (threshold date already past). The strategy layer will decide what to do when pricing isn't available — it's not pricing's job to invent a number.
+
+### Tests (+13, total now 23)
+- 4 cities tests (known-code lookup, unknown → None, coord ranges, no duplicate codes).
+- 9 pricing tests covering: well-above / well-below / at-threshold (the continuity-correction load-bearing test), the symmetric at-or-below at-threshold case, sigma-grows-with-horizon, daily_low_uses_previous_night_period (the X-1 matching rule), and the three error variants.
+
+### State after today
+- `cargo test --workspace` clean; 23 tests passing.
+- Branch: `feat/locations-and-pricing`, 2 commits + this devlog entry.
+- The pieces aren't yet wired together — pricing doesn't run inside the bot main loop, and there's no forecast fetcher per city. Next step is the strategy/wiring layer.
+
+### What's next
+3. **Strategy + signal generation (`weather-strategy`).** Given a `KalshiMarket`, its parsed `WeatherThreshold`, and a fresh `Forecast` for the city's lat/lon: compute model probability, compare to `last_price_dollars`, emit a `Signal` if `|edge| ≥ min_edge`. Quarter-Kelly contract sizing.
+4. **Risk manager (`weather-risk`).**
+5. **Kalshi RSA auth + executor (`weather-executor`).**
+6. **Bot main loop wiring all of it.** The strategy step also needs a per-city forecast cache — fetch once per city per refresh, not per market.
+7. **Paper-trade for a week.**
+

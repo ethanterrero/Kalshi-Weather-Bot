@@ -1561,6 +1561,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust_decimal_macros"
+version = "1.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74a5a6f027e892c7a035c6fddb50435a1fbf5a734ffc0c2a9fed4d0221440519"
+dependencies = [
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "rustix"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2448,6 +2458,8 @@ name = "weather-bot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
+ "rust_decimal",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2519,6 +2531,7 @@ dependencies = [
 name = "weather-pricing"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "rust_decimal",
  "weather-types",
 ]
@@ -2554,8 +2567,13 @@ dependencies = [
 name = "weather-strategy"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "uuid",
  "weather-config",
+ "weather-pricing",
  "weather-types",
 ]
 

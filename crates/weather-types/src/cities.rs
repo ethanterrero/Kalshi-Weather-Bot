@@ -2,8 +2,8 @@
 //!
 //! Kalshi weather markets settle on the **NWS Daily Climate Report (CLI)** for
 //! a specific airport-class station (e.g. NYC = KNYC / Central Park, Chicago
-//! = KORD, LA = KLAX, Miami = KMIA, Austin = KAUS). To trade with edge we need
-//! both:
+//! = KMDW / Midway, LA = KLAX, Miami = KMIA, Austin = KAUS). To trade with
+//! edge we need both:
 //!
 //!   1. A `(lat, lon)` for the NWS gridded forecast — passed to
 //!      `/points/{lat,lon}` to discover the gridpoint.
@@ -60,11 +60,17 @@ const CITIES: &[CitySpec] = &[
         standard_utc_offset_hours: -5, // EST
     },
     CitySpec {
+        // Kalshi's KXHIGHCHI / KXLOWCHI markets settle on **Midway (KMDW)**,
+        // not O'Hare (KORD). Verified against the live `rules_primary` field
+        // on demo-api ("the highest temperature recorded at Chicago Midway,
+        // IL ... according to the National Weather Service's Climatological
+        // Report (Daily)"). KORD is ~27 km north — using it would silently
+        // bias every Chicago forecast.
         kalshi_code: "CHI",
-        name: "Chicago (O'Hare)",
-        lat: 41.9742,
-        lon: -87.9073,
-        icao: "KORD",
+        name: "Chicago (Midway)",
+        lat: 41.7868,
+        lon: -87.7522,
+        icao: "KMDW",
         standard_utc_offset_hours: -6, // CST
     },
     CitySpec {
@@ -108,7 +114,7 @@ mod tests {
     #[test]
     fn known_cities_resolve() {
         assert_eq!(lookup_city("NY").unwrap().icao, "KNYC");
-        assert_eq!(lookup_city("CHI").unwrap().icao, "KORD");
+        assert_eq!(lookup_city("CHI").unwrap().icao, "KMDW");
         assert_eq!(lookup_city("LAX").unwrap().icao, "KLAX");
     }
 

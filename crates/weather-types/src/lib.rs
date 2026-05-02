@@ -6,6 +6,12 @@
 //! grouped under "series" (the recurring contract template, e.g. "KXHIGH-NY").
 //! Threshold values live on the market, not the event.
 
+pub mod cities;
+pub mod tempwindow;
+
+pub use cities::{lookup_city, CitySpec};
+pub use tempwindow::{daily_high_window_utc, daily_low_window_utc};
+
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

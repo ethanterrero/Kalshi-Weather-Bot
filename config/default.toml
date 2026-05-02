@@ -35,6 +35,13 @@ series_tickers = [
 min_edge = "0.05"
 # Kelly fraction multiplier. 0.25 = "quarter Kelly" — conservative.
 kelly_fraction = "0.25"
+# Extra margin (dollars per contract) the EV gate requires on top of fees.
+safety_buffer = "0.01"
+# Per-series Kalshi fee multiplier. 1.0 matches most weather markets per
+# https://help.kalshi.com/en/articles/13823805-fees.
+fee_multiplier = "1.0"
+# Max bid-ask spread we'll trade across. Beyond this, round-trip costs eat the edge.
+max_spread = "0.10"
 
 [risk]
 # Hard caps. v1 is intentionally tiny — directional weather edges are noisy and

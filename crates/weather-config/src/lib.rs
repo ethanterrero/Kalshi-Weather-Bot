@@ -87,6 +87,29 @@ pub struct ScannerConfig {
 pub struct StrategyConfig {
     pub min_edge: Decimal,
     pub kelly_fraction: Decimal,
+    /// Extra margin (dollars per contract) the EV gate requires on top of
+    /// half-spread + estimated fee before taking a position. 0 = pure
+    /// fee+spread breakeven. Default 0.01 = 1¢ buffer.
+    #[serde(default = "default_safety_buffer")]
+    pub safety_buffer: Decimal,
+    /// Per-100-contracts fee multiplier the fee model assumes. Most Kalshi
+    /// markets are 1.0; some series are higher. Default matches the
+    /// help-center fee schedule.
+    #[serde(default = "default_fee_multiplier")]
+    pub fee_multiplier: Decimal,
+    /// Maximum bid-ask spread (in dollars) we'll trade across. Default 0.10.
+    #[serde(default = "default_max_spread")]
+    pub max_spread: Decimal,
+}
+
+fn default_safety_buffer() -> Decimal {
+    Decimal::new(1, 2)
+}
+fn default_fee_multiplier() -> Decimal {
+    Decimal::ONE
+}
+fn default_max_spread() -> Decimal {
+    Decimal::new(10, 2)
 }
 
 #[derive(Debug, Clone, Deserialize)]

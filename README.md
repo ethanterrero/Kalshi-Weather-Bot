@@ -20,6 +20,23 @@ If your **forecast-derived probability** disagrees with the market by more than 
 
 This is **not arbitrage** — it's a forecast-quality bet. The bot loses if NOAA's forecast is wrong more often than the Kalshi market thinks.
 
+### The edge framework (fee + spread + buffer gate)
+
+A raw "model probability beats market price by 5¢" condition isn't enough — round-trip costs eat thin edges. Every market is run through this gate before the bot will act:
+
+```
+net_ev_per_contract = our_prob - price - estimated_fee
+trade if   raw_edge ≥ min_edge
+       AND spread ≤ max_spread
+       AND net_ev_per_contract ≥ safety_buffer
+```
+
+- **Estimated fee** uses Kalshi's published formula `multiplier * 0.07 * p * (1 - p)` per contract, rounded up to the next cent. Implemented in `weather-strategy::fees`.
+- **Both YES and NO sides** are evaluated. The implied NO ask is `1 - yes_bid` (Kalshi binary no-arb). The bot picks the side with the larger raw edge.
+- **Settlement-source validation**: every Kalshi city code (`NY`, `CHI`, `LAX`, `MIA`, `AUS`) is mapped to the ICAO station whose **NWS Daily Climate Report (CLI)** Kalshi settles on (`KNYC`, `KORD`, `KLAX`, `KMIA`, `KAUS`). The pricing layer refuses to model an unmapped city — better to abstain than to compare a forecast to the wrong station.
+- **Standard-time settlement window**: per the [Kalshi help page](https://help.kalshi.com/en/articles/13823837-weather-markets), high-temperature settlement uses **local standard time** even during DST. `weather-types::tempwindow` builds the half-open UTC window `[date 00:00 LST, date+1 00:00 LST)` and the pricing layer matches forecast periods against it, so a summer NYC market is evaluated against UTC `[05:00, 05:00 next day)`, never `[04:00, 04:00 next day)`.
+- **Probabilistic, not deterministic**: instead of "forecast > threshold → buy YES", we compute `P(YES) = 1 - Φ((T - μ) / σ)` with a horizon-indexed σ (1.6°F at day 0 → 5°F at day 7). At μ ≈ T this gives ~50/50 — exactly when the market should be a coin flip too. Edge appears in the tails. This is the slot where an ensemble source (NOAA GEFS, ECMWF open data, Open-Meteo ECMWF) can drop in later to replace fixed σ with realized ensemble dispersion.
+
 ---
 
 ## Architecture
@@ -66,16 +83,18 @@ Rust workspace with ten crates. The shape mirrors the polymarket-arbitrage-bot b
 ## Status (v0)
 
 What's real today:
-- Workspace compiles, 1 test passes (`weather_forecast::tests::parses_real_nws_forecast_response`).
+- Workspace compiles cleanly; 36 unit tests passing across types/pricing/strategy/scanner/forecast.
 - NOAA NWS client implemented end-to-end (`NwsClient::fetch_point_forecast`).
-- Config + tracing scaffolding lifted from the polymarket bot pattern.
+- Kalshi `/markets` scanner (paginating, 429-aware) + ticker-parser pinned to live demo-api responses.
+- Probabilistic pricing model (Normal-CDF with continuity correction, horizon-indexed σ) with settlement-station validation.
+- Fee-aware EV gate evaluating both YES and NO sides; explicit `NoTrade` reason logged when nothing fires.
+- DST / local-standard-time settlement window helper.
+- Bot main loop runs the full forecast → pricing → strategy pipeline in dry-run.
 
 What's stubbed (TODOs in each crate):
-- Kalshi REST client (scanner, monitor, executor) — Kalshi auth is RSA-PSS-SHA256, totally different from anything in the polymarket bot.
-- Pricing model (Normal-with-fixed-σ for v1).
-- Strategy edge filter + Kelly sizing.
-- Risk manager.
-- Bot main loop wiring the above together.
+- Kalshi REST executor (RSA-PSS-SHA256 auth + `POST /portfolio/orders`).
+- Risk manager (position caps, cooldowns, total-exposure check).
+- WebSocket-based orderbook deltas (v1 uses REST polling on `monitor.poll_interval_ms`).
 
 See **[devlog.md](devlog.md)** for the ordered backlog.
 
@@ -92,9 +111,12 @@ Edit `config/default.toml`. Override with env vars using `__` (e.g. `STRATEGY__M
 | **forecast** | `nws_base_url` | NOAA NWS base. Default `https://api.weather.gov`. |
 | | `user_agent` | NWS rejects requests without a meaningful UA. **Edit this with your contact email.** |
 | | `refresh_interval_secs` | How often to re-poll forecasts. |
-| **scanner** | `series_prefixes` | Only ingest Kalshi markets whose `series_ticker` starts with one of these. v1 default is `["KXHIGH", "KXLOW"]`. |
+| **scanner** | `series_tickers` | Full Kalshi series tickers to ingest (e.g. `KXHIGHNY`). Kalshi's `?series_ticker=` filter requires exact match, not a prefix. |
 | **strategy** | `min_edge` | Don't take a position unless `|model_p − market_p| ≥ this`. |
 | | `kelly_fraction` | Fraction of full Kelly to bet. 0.25 = quarter-Kelly. |
+| | `safety_buffer` | Extra dollars-per-contract margin the EV gate requires on top of fees. |
+| | `fee_multiplier` | Per-series Kalshi fee multiplier (1.0 for most weather markets). |
+| | `max_spread` | Maximum bid-ask spread the bot will trade across. |
 | **risk** | `max_position_size_usd`, `max_total_exposure_usd`, `per_market_cooldown_secs`, `max_concurrent_positions` | Hard caps. v1 defaults are intentionally tiny. |
 
 ---
@@ -108,7 +130,30 @@ cargo run --release -p weather-bot
 
 Run from the repo root — config is loaded from `config/default.toml` relative to the working directory.
 
-For live trading (when v1 lands): copy `.env.example` → `.env`, set `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH`, point the path at the PEM file Kalshi gave you, set `KALSHI_ENV=prod` and `execution.mode = "live"`.
+The bot is **safe by default**: `execution.mode = "dry_run"` means it scans markets, runs the model, and logs trade decisions, but **places no orders**. Even if you set `mode = "live"` today, the executor crate is still a stub — the bot will warn and stay in dry-run.
+
+For (eventual) live trading: copy `.env.example` → `.env`, set `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH`, point the path at the PEM file Kalshi gave you, set `KALSHI_ENV=prod` and `execution.mode = "live"`.
+
+### Reading the dry-run logs
+
+A successful trade decision logs at INFO level with the full EV math:
+
+```
+TRADE (dry-run) ticker=KXHIGHNY-26JUL04-T75 side=Yes limit_price=0.50
+  contracts=37 model_p=0.85 market_p=0.50 spread=0.05
+  fee_est=0.02 raw_edge=0.35 net_ev=0.33
+  station=KNYC forecast_temp_f=78 horizon_days=1 sigma_f=2
+```
+
+A no-trade decision logs the explicit reason — at DEBUG for the common cases (`EdgeBelowMin`, `EvBelowGate`) so the INFO stream isn't flooded, and at INFO for the louder ones (`SpreadTooWide`, `NoOrderbook`). Set `RUST_LOG=weather_bot=debug` to see every market's decision.
+
+## Limitations (read this before trusting the bot)
+
+- **σ is hand-calibrated**, not learned. Realized NWS errors vary by city, season, and synoptic regime. Plug an ensemble source (NOAA GEFS, ECMWF open data, Open-Meteo) into `weather-pricing::sigma_for_horizon` to do better.
+- **No risk manager wired in yet**. The strategy emits a contract-count hint; an actual risk layer with position caps and total-exposure checks needs to gate signals before any executor runs.
+- **No WebSocket**. Prices come from REST polling on `monitor.poll_interval_ms` (default 5 s). For thin weather markets that's fine, but a stale-price gate using `orderbook_delta` ([Kalshi WS docs](https://docs.kalshi.com/getting_started/quick_start_websockets)) is the obvious next improvement.
+- **Settlement validation is by static table**. We map five city codes to ICAO stations by hand. If Kalshi adds a city we don't know, the bot abstains rather than guesses.
+- **NWS forecast is the only model input**. No ensemble blending, no METAR observation feed, no preliminary CLI gating against the [delayed-settlement risks](https://help.kalshi.com/en/articles/13823837-weather-markets) noted in Kalshi's help page.
 
 ---
 

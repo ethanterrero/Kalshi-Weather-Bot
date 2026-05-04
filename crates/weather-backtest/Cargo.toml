@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 weather-forecast = { path = "../weather-forecast" }
+weather-pricing = { path = "../weather-pricing" }
 weather-types = { path = "../weather-types" }
 
 chrono = { workspace = true }

@@ -1,6 +1,9 @@
+mod decision_log;
+
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -11,6 +14,8 @@ use weather_pricing::{price_market, PricingError};
 use weather_scanner::MarketScanner;
 use weather_strategy::{decide, Decision, FeeModel, NoTradeReason};
 use weather_types::{lookup_city, Forecast};
+
+use decision_log::{record_from, DecisionLogger};
 
 /// Cached forecast keyed on Kalshi city code (e.g. "NY"). Refreshed on its
 /// own cadence; the strategy loop reads from this cache rather than calling
@@ -43,6 +48,25 @@ async fn main() -> Result<()> {
     ));
     let forecast_cache: ForecastCache = Arc::new(RwLock::new(HashMap::new()));
 
+    let decision_logger = Arc::new(DecisionLogger::new(
+        config
+            .logging
+            .decision_log_dir
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from),
+    ));
+    if let Some(dir) = config
+        .logging
+        .decision_log_dir
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        info!(dir, "decision log enabled");
+    } else {
+        info!("decision log disabled (logging.decision_log_dir = null/empty)");
+    }
+
     info!("Running initial Kalshi market scan...");
     match scanner.refresh().await {
         Ok(count) => info!(count, "Initial scan complete"),
@@ -70,6 +94,7 @@ async fn main() -> Result<()> {
     let cfg_for_strat = config.clone();
     let nws_for_strat = nws.clone();
     let cache_for_strat = forecast_cache.clone();
+    let logger_for_strat = decision_logger.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(poll_ms));
         interval.tick().await;
@@ -80,6 +105,7 @@ async fn main() -> Result<()> {
                 &nws_for_strat,
                 &cache_for_strat,
                 &cfg_for_strat,
+                &logger_for_strat,
             )
             .await;
         }
@@ -99,6 +125,7 @@ async fn run_strategy_pass(
     nws: &NwsClient,
     cache: &ForecastCache,
     cfg: &AppConfig,
+    logger: &DecisionLogger,
 ) {
     let snapshot = {
         let lock = scanner.markets();
@@ -167,6 +194,12 @@ async fn run_strategy_pass(
         };
 
         let decision = decide(&tracked.market, &pricing, &cfg.strategy, &fees);
+
+        let record = record_from(&tracked.market, city_code, &pricing, &decision, Utc::now());
+        if let Err(e) = logger.record(&record).await {
+            warn!(error = %e, ticker = %tracked.market.ticker, "decision log write failed");
+        }
+
         log_decision(&tracked.market.ticker, &pricing, &decision);
     }
 }

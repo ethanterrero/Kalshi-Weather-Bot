@@ -2494,13 +2494,19 @@ name = "weather-executor"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "rand",
  "reqwest",
  "rsa",
+ "rust_decimal",
+ "rust_decimal_macros",
  "serde",
+ "serde_json",
  "sha2",
  "thiserror",
+ "tokio",
  "tracing",
+ "uuid",
  "weather-config",
  "weather-types",
 ]

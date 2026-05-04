@@ -102,9 +102,38 @@ pub struct EvBreakdown {
 #[derive(Debug, Clone)]
 pub enum NoTradeReason {
     NoOrderbook,
-    SpreadTooWide { spread: Decimal, max: Decimal },
-    EdgeBelowMin { raw_edge: Decimal, min: Decimal },
-    EvBelowGate { net_ev: Decimal, required: Decimal },
+    SpreadTooWide {
+        spread: Decimal,
+        max: Decimal,
+    },
+    EdgeBelowMin {
+        raw_edge: Decimal,
+        min: Decimal,
+    },
+    EvBelowGate {
+        net_ev: Decimal,
+        required: Decimal,
+    },
+    /// Limit price is outside the configured `[min_price, max_price]` band.
+    /// Tail-bracket contracts (cheap or near-1.00) carry asymmetric blow-up
+    /// risk: a $0.05 contract priced at 50% true still needs an ~83% true
+    /// hit rate to break even after fees, and one losing tail event wipes
+    /// out months of small wins. Both ends are excluded.
+    PriceOutOfBand {
+        price: Decimal,
+        min: Decimal,
+        max: Decimal,
+    },
+    /// NWS issued the forecast we'd be trading off less than the lockout
+    /// window ago. Arb bots reprice within seconds of an NWS update; we
+    /// sit out the first 30 minutes to avoid being adversely selected.
+    /// The decision is gated externally (in the strategy loop) rather
+    /// than inside `decide()` because the forecast freshness clock isn't
+    /// part of the orderbook + pricing inputs `decide` already takes.
+    ForecastTooFresh {
+        age_secs: i64,
+        lockout_secs: i64,
+    },
 }
 
 impl std::fmt::Display for NoTradeReason {
@@ -119,6 +148,19 @@ impl std::fmt::Display for NoTradeReason {
             }
             NoTradeReason::EvBelowGate { net_ev, required } => {
                 write!(f, "net EV {} < required {}", net_ev, required)
+            }
+            NoTradeReason::PriceOutOfBand { price, min, max } => {
+                write!(f, "price {} outside band [{}, {}]", price, min, max)
+            }
+            NoTradeReason::ForecastTooFresh {
+                age_secs,
+                lockout_secs,
+            } => {
+                write!(
+                    f,
+                    "NWS forecast issued {}s ago, inside {}s lockout",
+                    age_secs, lockout_secs
+                )
             }
         }
     }
@@ -171,6 +213,17 @@ pub fn decide(
         return Decision::NoTrade(NoTradeReason::EdgeBelowMin {
             raw_edge,
             min: cfg.min_edge,
+        });
+    }
+
+    // Price band check: tail-bracket contracts (cheap or near-1.00) carry
+    // asymmetric blow-up risk. Apply after edge so the JSONL can show
+    // there *was* an edge but we declined for risk reasons.
+    if price < cfg.min_price || price > cfg.max_price {
+        return Decision::NoTrade(NoTradeReason::PriceOutOfBand {
+            price,
+            min: cfg.min_price,
+            max: cfg.max_price,
         });
     }
 
@@ -289,6 +342,8 @@ mod tests {
             safety_buffer: dec!(0.01),
             fee_multiplier: dec!(1),
             max_spread: dec!(0.10),
+            min_price: dec!(0.20),
+            max_price: dec!(0.92),
         }
     }
 
@@ -387,5 +442,48 @@ mod tests {
             "got {:?}",
             d
         );
+    }
+
+    #[test]
+    fn cheap_contract_below_price_floor_is_no_trade() {
+        // Model P(YES) = 0.85, YES ask = 0.10. Massive raw edge (75¢) and
+        // huge gross EV — but the price is below the configured floor of
+        // 0.20, so the asymmetric tail-blow-up risk gate fires.
+        let m = market(Some(dec!(0.05)), Some(dec!(0.10)));
+        let p = pricing(dec!(0.85));
+        let d = decide(&m, &p, &cfg(), &FeeModel::default());
+        match d {
+            Decision::NoTrade(NoTradeReason::PriceOutOfBand { price, min, max }) => {
+                assert_eq!(price, dec!(0.10));
+                assert_eq!(min, dec!(0.20));
+                assert_eq!(max, dec!(0.92));
+            }
+            other => panic!("expected PriceOutOfBand, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn pricey_contract_above_price_ceiling_is_no_trade() {
+        // Model P(YES) = 1.0, YES ask = 0.95. Raw edge = 5¢ (clears
+        // min_edge), but the ceiling at 0.92 kicks in before EvBelowGate.
+        let m = market(Some(dec!(0.93)), Some(dec!(0.95)));
+        let p = pricing(dec!(1.0));
+        let d = decide(&m, &p, &cfg(), &FeeModel::default());
+        assert!(
+            matches!(d, Decision::NoTrade(NoTradeReason::PriceOutOfBand { .. })),
+            "got {:?}",
+            d
+        );
+    }
+
+    #[test]
+    fn price_band_widening_lets_an_otherwise_fine_trade_through() {
+        // Same setup that fails by default; widen the band to allow it.
+        let m = market(Some(dec!(0.05)), Some(dec!(0.10)));
+        let p = pricing(dec!(0.85));
+        let mut c = cfg();
+        c.min_price = dec!(0.05);
+        let d = decide(&m, &p, &c, &FeeModel::default());
+        assert!(matches!(d, Decision::Trade(_, _)), "got {:?}", d);
     }
 }

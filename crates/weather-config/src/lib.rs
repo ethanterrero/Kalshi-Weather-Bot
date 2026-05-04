@@ -72,6 +72,17 @@ pub struct ForecastConfig {
     pub nws_base_url: String,
     pub user_agent: String,
     pub refresh_interval_secs: u64,
+    /// Skip trades for `nws_lockout_after_update_secs` after the NWS
+    /// forecast was *issued* (its `generatedAt`, not our fetch time).
+    /// Arbitrage bots reprice within seconds of an NWS update; sitting out
+    /// the first 30 minutes avoids being adversely selected. Default 1800
+    /// seconds. Set to 0 to disable.
+    #[serde(default = "default_nws_lockout_secs")]
+    pub nws_lockout_after_update_secs: u64,
+}
+
+fn default_nws_lockout_secs() -> u64 {
+    1800
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -100,6 +111,16 @@ pub struct StrategyConfig {
     /// Maximum bid-ask spread (in dollars) we'll trade across. Default 0.10.
     #[serde(default = "default_max_spread")]
     pub max_spread: Decimal,
+    /// Lowest price we'll pay per contract. Below this, fees are a fatal
+    /// fraction of the price and one losing tail event wipes out months of
+    /// small wins. Default 0.20.
+    #[serde(default = "default_min_price")]
+    pub min_price: Decimal,
+    /// Highest price we'll pay per contract. At/above this the implied
+    /// edge has to be huge to clear fees + asymmetric tail risk. Default
+    /// 0.92.
+    #[serde(default = "default_max_price")]
+    pub max_price: Decimal,
 }
 
 fn default_safety_buffer() -> Decimal {
@@ -110,6 +131,12 @@ fn default_fee_multiplier() -> Decimal {
 }
 fn default_max_spread() -> Decimal {
     Decimal::new(10, 2)
+}
+fn default_min_price() -> Decimal {
+    Decimal::new(20, 2)
+}
+fn default_max_price() -> Decimal {
+    Decimal::new(92, 2)
 }
 
 #[derive(Debug, Clone, Deserialize)]

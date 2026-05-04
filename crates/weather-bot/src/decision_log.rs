@@ -117,7 +117,10 @@ pub fn record_from(
             rec.decision = "no_trade".into();
             rec.reason = Some(no_trade_tag(reason).to_string());
             match reason {
-                NoTradeReason::NoOrderbook | NoTradeReason::SpreadTooWide { .. } => {}
+                NoTradeReason::NoOrderbook
+                | NoTradeReason::SpreadTooWide { .. }
+                | NoTradeReason::PriceOutOfBand { .. }
+                | NoTradeReason::ForecastTooFresh { .. } => {}
                 NoTradeReason::EdgeBelowMin { raw_edge, .. } => {
                     rec.raw_edge = Some(*raw_edge);
                 }
@@ -136,6 +139,8 @@ fn no_trade_tag(reason: &NoTradeReason) -> &'static str {
         NoTradeReason::SpreadTooWide { .. } => "spread_too_wide",
         NoTradeReason::EdgeBelowMin { .. } => "edge_below_min",
         NoTradeReason::EvBelowGate { .. } => "ev_below_gate",
+        NoTradeReason::PriceOutOfBand { .. } => "price_out_of_band",
+        NoTradeReason::ForecastTooFresh { .. } => "forecast_too_fresh",
     }
 }
 

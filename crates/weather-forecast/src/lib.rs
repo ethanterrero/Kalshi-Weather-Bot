@@ -76,6 +76,7 @@ impl NwsClient {
             .forecast
             .ok_or(ForecastError::Missing("properties.forecast"))?;
         let body: ForecastResponse = self.get_json(&forecast_url).await?;
+        let generated_at = body.properties.generated_at;
         let periods = body
             .properties
             .periods
@@ -86,6 +87,7 @@ impl NwsClient {
             lat,
             lon,
             fetched_at: Utc::now(),
+            generated_at,
             periods,
         })
     }
@@ -150,7 +152,13 @@ struct ForecastResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ForecastProperties {
+    /// When NWS *issued* this forecast. Distinct from when we polled it.
+    /// `generatedAt` is the field exposed in the GeoJSON properties block;
+    /// older NWS responses use `updateTime` — accept either.
+    #[serde(default, alias = "updateTime")]
+    generated_at: Option<DateTime<Utc>>,
     periods: Vec<RawPeriod>,
 }
 

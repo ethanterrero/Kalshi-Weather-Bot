@@ -213,7 +213,16 @@ async fn run_strategy_pass(
             }
         };
 
-        let decision = decide(&tracked.market, &pricing, &cfg.strategy, &fees);
+        // NWS-update lockout: if the forecast we're pricing against was
+        // issued in the last `nws_lockout_after_update_secs`, sit out the
+        // trade — arbitrage bots reprice within seconds of an issue and
+        // we don't want to be on the wrong side of that. The freshness
+        // clock is NWS's `generatedAt`, not our local fetch time.
+        let decision =
+            match nws_lockout_decision(&forecast, cfg.forecast.nws_lockout_after_update_secs) {
+                Some(reason) => Decision::NoTrade(reason),
+                None => decide(&tracked.market, &pricing, &cfg.strategy, &fees),
+            };
 
         let record = record_from(
             &tracked.market,
@@ -234,6 +243,26 @@ async fn run_strategy_pass(
         if let Decision::Trade(sig, _) = &decision {
             apply_risk(risk, sig);
         }
+    }
+}
+
+/// If the NWS forecast was issued less than `lockout_secs` ago, return
+/// the matching `NoTradeReason::ForecastTooFresh`. `lockout_secs == 0` or
+/// a forecast missing `generated_at` both disable the gate.
+fn nws_lockout_decision(forecast: &Forecast, lockout_secs: u64) -> Option<NoTradeReason> {
+    if lockout_secs == 0 {
+        return None;
+    }
+    let issued = forecast.generated_at?;
+    let age = Utc::now().signed_duration_since(issued).num_seconds();
+    let lockout = lockout_secs as i64;
+    if (0..lockout).contains(&age) {
+        Some(NoTradeReason::ForecastTooFresh {
+            age_secs: age,
+            lockout_secs: lockout,
+        })
+    } else {
+        None
     }
 }
 
@@ -319,5 +348,65 @@ fn init_tracing(config: &weather_config::LoggingConfig) {
         fmt().with_env_filter(filter).json().init();
     } else {
         fmt().with_env_filter(filter).with_target(true).init();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn forecast_with(generated_at: Option<DateTime<Utc>>) -> Forecast {
+        Forecast {
+            lat: 40.78,
+            lon: -73.97,
+            fetched_at: Utc::now(),
+            generated_at,
+            periods: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn lockout_zero_seconds_disables_the_gate() {
+        let f = forecast_with(Some(Utc::now()));
+        assert!(nws_lockout_decision(&f, 0).is_none());
+    }
+
+    #[test]
+    fn missing_generated_at_disables_the_gate() {
+        let f = forecast_with(None);
+        assert!(nws_lockout_decision(&f, 1800).is_none());
+    }
+
+    #[test]
+    fn fresh_forecast_inside_window_triggers_lockout() {
+        // Issued 5 minutes ago, lockout is 30 minutes.
+        let issued = Utc::now() - chrono::Duration::minutes(5);
+        let f = forecast_with(Some(issued));
+        match nws_lockout_decision(&f, 1800) {
+            Some(NoTradeReason::ForecastTooFresh {
+                age_secs,
+                lockout_secs,
+            }) => {
+                assert!((290..=310).contains(&age_secs), "age: {}", age_secs);
+                assert_eq!(lockout_secs, 1800);
+            }
+            other => panic!("expected ForecastTooFresh, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn stale_forecast_outside_window_does_not_trigger_lockout() {
+        // Issued 90 minutes ago, lockout is 30 minutes.
+        let issued = Utc::now() - chrono::Duration::minutes(90);
+        let f = forecast_with(Some(issued));
+        assert!(nws_lockout_decision(&f, 1800).is_none());
+    }
+
+    #[test]
+    fn forecast_issued_in_the_future_does_not_trigger_lockout() {
+        // Defensive: future timestamps shouldn't lock us out forever.
+        let issued = Utc::now() + chrono::Duration::minutes(10);
+        let f = forecast_with(Some(issued));
+        assert!(nws_lockout_decision(&f, 1800).is_none());
     }
 }

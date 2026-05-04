@@ -8,3 +8,9 @@ weather-config = { path = "../weather-config" }
 weather-types = { path = "../weather-types" }
 rust_decimal = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }
+rust_decimal_macros = { workspace = true }
+uuid = { workspace = true }

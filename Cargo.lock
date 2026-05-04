@@ -2551,8 +2551,12 @@ dependencies = [
 name = "weather-risk"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "rust_decimal",
+ "rust_decimal_macros",
  "tokio",
+ "tracing",
+ "uuid",
  "weather-config",
  "weather-types",
 ]

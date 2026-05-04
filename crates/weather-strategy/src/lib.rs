@@ -69,9 +69,13 @@ impl OrderbookQuote {
 /// What the strategy decided about a market, and why. The explicit `NoTrade`
 /// branch is what dry-run logs print so the operator can see edge framework
 /// math rather than just silence.
+///
+/// `EvBreakdown` is boxed because it's ~10× the size of `NoTradeReason`, and
+/// most decisions in the loop are `NoTrade`. Box auto-derefs at field-access
+/// callsites so consumer code doesn't have to change shape.
 #[derive(Debug, Clone)]
 pub enum Decision {
-    Trade(Signal, EvBreakdown),
+    Trade(Signal, Box<EvBreakdown>),
     NoTrade(NoTradeReason),
 }
 
@@ -151,12 +155,17 @@ pub fn decide(
     let no_ev = side_ev(Side::No, no_ask, Decimal::ONE - model_p, fees);
 
     // Pick the side with the larger raw edge. Both EVs are net-of-fee.
-    let (side, price, market_implied, raw_edge, net_ev) =
-        if yes_ev.raw_edge >= no_ev.raw_edge {
-            (Side::Yes, yes_ask, yes_ask, yes_ev.raw_edge, yes_ev.net_ev)
-        } else {
-            (Side::No, no_ask, Decimal::ONE - no_ask, no_ev.raw_edge, no_ev.net_ev)
-        };
+    let (side, price, market_implied, raw_edge, net_ev) = if yes_ev.raw_edge >= no_ev.raw_edge {
+        (Side::Yes, yes_ask, yes_ask, yes_ev.raw_edge, yes_ev.net_ev)
+    } else {
+        (
+            Side::No,
+            no_ask,
+            Decimal::ONE - no_ask,
+            no_ev.raw_edge,
+            no_ev.net_ev,
+        )
+    };
 
     if raw_edge < cfg.min_edge {
         return Decision::NoTrade(NoTradeReason::EdgeBelowMin {
@@ -167,10 +176,7 @@ pub fn decide(
 
     let required = cfg.safety_buffer;
     if net_ev < required {
-        return Decision::NoTrade(NoTradeReason::EvBelowGate {
-            net_ev,
-            required,
-        });
+        return Decision::NoTrade(NoTradeReason::EvBelowGate { net_ev, required });
     }
 
     let fee_estimate = estimate_fee_per_contract(price, fees);
@@ -202,7 +208,7 @@ pub fn decide(
         edge: raw_edge,
         generated_at: Utc::now(),
     };
-    Decision::Trade(signal, breakdown)
+    Decision::Trade(signal, Box::new(breakdown))
 }
 
 struct SideEv {
@@ -323,7 +329,10 @@ mod tests {
         let m = market(Some(dec!(0.50)), Some(dec!(0.54)));
         let p = pricing(dec!(0.55));
         let d = decide(&m, &p, &cfg(), &FeeModel::default());
-        assert!(matches!(d, Decision::NoTrade(NoTradeReason::EdgeBelowMin { .. })));
+        assert!(matches!(
+            d,
+            Decision::NoTrade(NoTradeReason::EdgeBelowMin { .. })
+        ));
     }
 
     #[test]

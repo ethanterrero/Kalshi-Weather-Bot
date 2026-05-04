@@ -156,8 +156,13 @@ async fn run_strategy_pass(
             let read = cache.read().await;
             match read.get(city_code) {
                 None => true,
-                Some((_, ts)) => Utc::now().signed_duration_since(*ts).to_std().unwrap_or_default()
-                    > refresh_after,
+                Some((_, ts)) => {
+                    Utc::now()
+                        .signed_duration_since(*ts)
+                        .to_std()
+                        .unwrap_or_default()
+                        > refresh_after
+                }
             }
         };
         if needs_refresh {
@@ -204,11 +209,7 @@ async fn run_strategy_pass(
     }
 }
 
-fn log_decision(
-    ticker: &str,
-    pricing: &weather_pricing::ModelPricing,
-    decision: &Decision,
-) {
+fn log_decision(ticker: &str, pricing: &weather_pricing::ModelPricing, decision: &Decision) {
     match decision {
         Decision::Trade(sig, ev) => {
             info!(
@@ -249,7 +250,8 @@ fn log_decision(
 
 fn init_tracing(config: &weather_config::LoggingConfig) {
     use tracing_subscriber::{fmt, EnvFilter};
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.level));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.level));
     if config.json_output {
         fmt().with_env_filter(filter).json().init();
     } else {

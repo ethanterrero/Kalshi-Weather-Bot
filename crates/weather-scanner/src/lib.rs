@@ -141,12 +141,18 @@ impl MarketScanner {
             };
             let before = tracked.len();
             for raw in raws {
-                match (parse_weather_threshold(&raw.ticker, &raw.strike_type), raw.into_market()) {
-                    (Some(threshold), market) => tracked.push(TrackedMarket { market, threshold }),
-                    _ => {} // unsupported shape (between-bins, custom strikes) — silently skip
+                // Unsupported shapes (between-bins, custom strikes) parse as
+                // None and silently skip.
+                if let Some(threshold) = parse_weather_threshold(&raw.ticker, &raw.strike_type) {
+                    let market = raw.into_market();
+                    tracked.push(TrackedMarket { market, threshold });
                 }
             }
-            debug!(series, parsed = tracked.len() - before, "series scan complete");
+            debug!(
+                series,
+                parsed = tracked.len() - before,
+                "series scan complete"
+            );
         }
         let count = tracked.len();
         *self.state.write().await = tracked;
@@ -207,10 +213,10 @@ pub fn parse_weather_threshold(ticker: &str, strike_type: &str) -> Option<Weathe
 fn parse_series(series: &str) -> Option<(TempStat, String)> {
     if let Some(city) = series.strip_prefix("KXHIGH") {
         Some((TempStat::DailyHigh, city.to_string()))
-    } else if let Some(city) = series.strip_prefix("KXLOW") {
-        Some((TempStat::DailyLow, city.to_string()))
     } else {
-        None
+        series
+            .strip_prefix("KXLOW")
+            .map(|city| (TempStat::DailyLow, city.to_string()))
     }
 }
 
@@ -222,8 +228,18 @@ fn parse_kalshi_date(s: &str) -> Option<NaiveDate> {
     }
     let yy: i32 = s[0..2].parse().ok()?;
     let mon = match &s[2..5] {
-        "JAN" => 1, "FEB" => 2, "MAR" => 3, "APR" => 4, "MAY" => 5, "JUN" => 6,
-        "JUL" => 7, "AUG" => 8, "SEP" => 9, "OCT" => 10, "NOV" => 11, "DEC" => 12,
+        "JAN" => 1,
+        "FEB" => 2,
+        "MAR" => 3,
+        "APR" => 4,
+        "MAY" => 5,
+        "JUN" => 6,
+        "JUL" => 7,
+        "AUG" => 8,
+        "SEP" => 9,
+        "OCT" => 10,
+        "NOV" => 11,
+        "DEC" => 12,
         _ => return None,
     };
     let day: u32 = s[5..7].parse().ok()?;
@@ -431,14 +447,15 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn smoke_test_demo_api_kxhighny() {
-        let client = KalshiClient::new(
-            "https://demo-api.kalshi.co/trade-api/v2".to_string(),
-        );
+        let client = KalshiClient::new("https://demo-api.kalshi.co/trade-api/v2".to_string());
         let raws = client
             .list_open_markets_in_series("KXHIGHNY")
             .await
             .expect("demo-api fetch");
-        assert!(!raws.is_empty(), "expected at least one open KXHIGHNY market");
+        assert!(
+            !raws.is_empty(),
+            "expected at least one open KXHIGHNY market"
+        );
         let parsed: Vec<_> = raws
             .iter()
             .filter_map(|r| parse_weather_threshold(&r.ticker, &r.strike_type))

@@ -3,16 +3,23 @@ name = "weather-backtest"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "calibrate"
+path = "src/bin/calibrate.rs"
+
 [dependencies]
 weather-forecast = { path = "../weather-forecast" }
 weather-pricing = { path = "../weather-pricing" }
 weather-types = { path = "../weather-types" }
 
+anyhow = { workspace = true }
 chrono = { workspace = true }
+clap = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 rust_decimal_macros = { workspace = true }

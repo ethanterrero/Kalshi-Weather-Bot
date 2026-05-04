@@ -79,9 +79,29 @@ pub struct ForecastConfig {
     /// seconds. Set to 0 to disable.
     #[serde(default = "default_nws_lockout_secs")]
     pub nws_lockout_after_update_secs: u64,
+    /// Use GEFS ensemble σ in pricing instead of the hand-calibrated
+    /// `sigma_for_horizon` table. The bot keeps the static table as a
+    /// fallback whenever the ensemble fetch fails or no in-window members
+    /// are available, so flipping this on is safe. Default true.
+    #[serde(default = "default_gefs_sigma_enabled")]
+    pub gefs_sigma_enabled: bool,
+    /// How often to refresh the GEFS ensemble (seconds). GEFS only
+    /// publishes new runs every ~6h, so polling more frequently is
+    /// pointless. Default 1800 = 30 min, which gives us at most one
+    /// stale window per real run.
+    #[serde(default = "default_gefs_refresh_secs")]
+    pub gefs_refresh_interval_secs: u64,
 }
 
 fn default_nws_lockout_secs() -> u64 {
+    1800
+}
+
+fn default_gefs_sigma_enabled() -> bool {
+    true
+}
+
+fn default_gefs_refresh_secs() -> u64 {
     1800
 }
 

@@ -9,12 +9,14 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 use weather_config::{AppConfig, ExecutionMode};
-use weather_forecast::NwsClient;
-use weather_pricing::{price_market, PricingError};
+use weather_forecast::{
+    daily_high_stats, daily_low_stats, EnsembleForecast, GefsClient, NwsClient,
+};
+use weather_pricing::{price_market_with_sigma, PricingError};
 use weather_risk::{RiskDecision, RiskManager};
 use weather_scanner::MarketScanner;
 use weather_strategy::{decide, Decision, FeeModel, NoTradeReason};
-use weather_types::{lookup_city, Forecast};
+use weather_types::{lookup_city, CitySpec, Forecast, TempStat};
 
 use decision_log::{record_from, DecisionLogger};
 
@@ -23,6 +25,12 @@ use decision_log::{record_from, DecisionLogger};
 /// NWS per market (which would burn the rate limit and be redundant — every
 /// market for a city/day shares one forecast).
 type ForecastCache = Arc<RwLock<HashMap<String, (Forecast, DateTime<Utc>)>>>;
+
+/// Same as ForecastCache but for GEFS ensemble fetches. Open-Meteo
+/// returns 30 perturbed members + a control out to ~16 forecast days
+/// per call, so one fetch covers every (date, stat) market we'd price
+/// for that city today and well into the future.
+type EnsembleCache = Arc<RwLock<HashMap<String, (EnsembleForecast, DateTime<Utc>)>>>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -47,7 +55,9 @@ async fn main() -> Result<()> {
         config.forecast.nws_base_url.clone(),
         config.forecast.user_agent.clone(),
     ));
+    let gefs = Arc::new(GefsClient::open_meteo());
     let forecast_cache: ForecastCache = Arc::new(RwLock::new(HashMap::new()));
+    let ensemble_cache: EnsembleCache = Arc::new(RwLock::new(HashMap::new()));
 
     let decision_logger = Arc::new(DecisionLogger::new(
         config
@@ -94,7 +104,9 @@ async fn main() -> Result<()> {
     let scanner_for_strat = scanner.clone();
     let cfg_for_strat = config.clone();
     let nws_for_strat = nws.clone();
+    let gefs_for_strat = gefs.clone();
     let cache_for_strat = forecast_cache.clone();
+    let ensemble_for_strat = ensemble_cache.clone();
     let logger_for_strat = decision_logger.clone();
     let mut risk_for_strat = RiskManager::new(config.risk.clone());
     info!(
@@ -102,6 +114,11 @@ async fn main() -> Result<()> {
         max_total_exposure_usd = %config.risk.max_total_exposure_usd,
         max_concurrent_positions = config.risk.max_concurrent_positions,
         "risk caps active"
+    );
+    info!(
+        gefs_enabled = config.forecast.gefs_sigma_enabled,
+        gefs_refresh_secs = config.forecast.gefs_refresh_interval_secs,
+        "GEFS σ source"
     );
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(poll_ms));
@@ -111,7 +128,9 @@ async fn main() -> Result<()> {
             run_strategy_pass(
                 &scanner_for_strat,
                 &nws_for_strat,
+                &gefs_for_strat,
                 &cache_for_strat,
+                &ensemble_for_strat,
                 &cfg_for_strat,
                 &logger_for_strat,
                 &mut risk_for_strat,
@@ -129,10 +148,13 @@ async fn main() -> Result<()> {
 
 /// Read tracked markets, refresh forecasts on demand, run pricing + EV gate
 /// per market, and log the decision.
+#[allow(clippy::too_many_arguments)]
 async fn run_strategy_pass(
     scanner: &MarketScanner,
     nws: &NwsClient,
+    gefs: &GefsClient,
     cache: &ForecastCache,
+    ensemble_cache: &EnsembleCache,
     cfg: &AppConfig,
     logger: &DecisionLogger,
     risk: &mut RiskManager,
@@ -155,6 +177,7 @@ async fn run_strategy_pass(
         multiplier: cfg.strategy.fee_multiplier,
     };
     let refresh_after = Duration::from_secs(cfg.forecast.refresh_interval_secs);
+    let ensemble_refresh_after = Duration::from_secs(cfg.forecast.gefs_refresh_interval_secs);
 
     for tracked in snapshot {
         let city_code = &tracked.threshold.city;
@@ -201,7 +224,18 @@ async fn run_strategy_pass(
             }
         };
 
-        let pricing = match price_market(&tracked.threshold, &forecast) {
+        // Optional GEFS ensemble σ override. Refresh-on-demand similar to
+        // NWS, but on its own (longer) cadence — ensemble runs only update
+        // every 6h. Failures fall back silently to the static σ table; no
+        // reason to abandon the trade just because one source is down.
+        let sigma_override = if cfg.forecast.gefs_sigma_enabled {
+            ensure_ensemble_fresh(gefs, ensemble_cache, city, ensemble_refresh_after).await;
+            resolve_gefs_sigma(ensemble_cache, city, &tracked.threshold).await
+        } else {
+            None
+        };
+
+        let pricing = match price_market_with_sigma(&tracked.threshold, &forecast, sigma_override) {
             Ok(p) => p,
             Err(PricingError::NoMatchingForecastPeriod) => {
                 // Common case: market is more than 7 days out (NWS horizon).
@@ -244,6 +278,68 @@ async fn run_strategy_pass(
             apply_risk(risk, sig);
         }
     }
+}
+
+/// Refresh the cached GEFS ensemble for `city` if it's missing or stale.
+/// Failures are logged at warn but do not propagate — the strategy loop
+/// falls back to the static σ table whenever no fresh ensemble is
+/// available.
+async fn ensure_ensemble_fresh(
+    gefs: &GefsClient,
+    cache: &EnsembleCache,
+    city: &CitySpec,
+    refresh_after: Duration,
+) {
+    let needs_refresh = {
+        let read = cache.read().await;
+        match read.get(city.kalshi_code) {
+            None => true,
+            Some((_, ts)) => {
+                Utc::now()
+                    .signed_duration_since(*ts)
+                    .to_std()
+                    .unwrap_or_default()
+                    > refresh_after
+            }
+        }
+    };
+    if !needs_refresh {
+        return;
+    }
+    // 7 forecast days covers everything NWS prices today and gives the
+    // pricing layer a horizon match for any in-horizon market.
+    match gefs.fetch_gfs05(city.lat, city.lon, 7).await {
+        Ok(f) => {
+            let mut write = cache.write().await;
+            write.insert(city.kalshi_code.to_string(), (f, Utc::now()));
+        }
+        Err(e) => {
+            warn!(city = city.kalshi_code, error = %e, "GEFS ensemble fetch failed; falling back to static σ");
+        }
+    }
+}
+
+/// Pull the cached GEFS ensemble for `city` and derive σ for the market's
+/// (date, stat). Returns `None` whenever no in-window ensemble data is
+/// available — the caller falls back to the static σ table.
+async fn resolve_gefs_sigma(
+    cache: &EnsembleCache,
+    city: &CitySpec,
+    threshold: &weather_types::WeatherThreshold,
+) -> Option<f64> {
+    let read = cache.read().await;
+    let (forecast, _) = read.get(city.kalshi_code)?;
+    let stat = match threshold.stat {
+        TempStat::DailyHigh => daily_high_stats(forecast, city, threshold.date)?,
+        TempStat::DailyLow => daily_low_stats(forecast, city, threshold.date)?,
+    };
+    // A handful of members can produce a zero or near-zero σ that's just
+    // sample noise. Guard against that by ignoring tiny σ — we'd rather
+    // fall back to the static table than over-confidently price near 0/1.
+    if stat.n_members < 5 || stat.sigma_f < 0.25 {
+        return None;
+    }
+    Some(stat.sigma_f)
 }
 
 /// If the NWS forecast was issued less than `lockout_secs` ago, return

@@ -215,7 +215,13 @@ async fn run_strategy_pass(
 
         let decision = decide(&tracked.market, &pricing, &cfg.strategy, &fees);
 
-        let record = record_from(&tracked.market, city_code, &pricing, &decision, Utc::now());
+        let record = record_from(
+            &tracked.market,
+            &tracked.threshold,
+            &pricing,
+            &decision,
+            Utc::now(),
+        );
         if let Err(e) = logger.record(&record).await {
             warn!(error = %e, ticker = %tracked.market.ticker, "decision log write failed");
         }

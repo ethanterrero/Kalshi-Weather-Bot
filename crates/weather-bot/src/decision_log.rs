@@ -10,7 +10,7 @@
 //! no edge or EV. We record what the strategy actually computed and leave the
 //! rest null rather than fabricating values.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 
 use weather_pricing::ModelPricing;
 use weather_strategy::{Decision, NoTradeReason};
-use weather_types::{KalshiMarket, Side};
+use weather_types::{KalshiMarket, Side, TempStat, ThresholdDirection, WeatherThreshold};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionRecord {
@@ -28,6 +28,15 @@ pub struct DecisionRecord {
     pub ticker: String,
     pub city: String,
     pub settlement_station: String,
+    /// Daily high vs daily low — backtests need this to pick which CLI
+    /// extreme to compare against.
+    pub stat: TempStat,
+    /// `at_or_above` or `at_or_below` — direction of the YES condition.
+    pub direction: ThresholdDirection,
+    /// Strike temperature in °F.
+    pub strike_temperature_f: i32,
+    /// Settlement date (the climate day Kalshi resolves on, not `ts`).
+    pub resolution_date: NaiveDate,
     pub horizon_days: i64,
     pub forecast_temp_f: i32,
     pub sigma_f: f64,
@@ -54,7 +63,7 @@ pub struct DecisionRecord {
 /// `Utc::now()`.
 pub fn record_from(
     market: &KalshiMarket,
-    city: &str,
+    threshold: &WeatherThreshold,
     pricing: &ModelPricing,
     decision: &Decision,
     now: DateTime<Utc>,
@@ -69,8 +78,12 @@ pub fn record_from(
     let mut rec = DecisionRecord {
         ts: now,
         ticker: market.ticker.clone(),
-        city: city.to_string(),
+        city: threshold.city.clone(),
         settlement_station: pricing.settlement_station.to_string(),
+        stat: threshold.stat,
+        direction: threshold.direction,
+        strike_temperature_f: threshold.temperature_f,
+        resolution_date: threshold.date,
         horizon_days: pricing.horizon_days,
         forecast_temp_f: pricing.forecast_temp_f,
         sigma_f: pricing.sigma_f,
@@ -207,6 +220,16 @@ mod tests {
         }
     }
 
+    fn ny_high_75() -> WeatherThreshold {
+        WeatherThreshold {
+            city: "NY".into(),
+            stat: TempStat::DailyHigh,
+            direction: ThresholdDirection::AtOrAbove,
+            temperature_f: 75,
+            date: chrono::NaiveDate::from_ymd_opt(2026, 7, 4).unwrap(),
+        }
+    }
+
     fn trade_decision() -> Decision {
         let sig = Signal {
             id: uuid::Uuid::nil(),
@@ -238,7 +261,7 @@ mod tests {
         let m = market(Some(dec!(0.45)), Some(dec!(0.50)));
         let p = pricing();
         let d = trade_decision();
-        let r = record_from(&m, "NY", &p, &d, ts());
+        let r = record_from(&m, &ny_high_75(), &p, &d, ts());
 
         assert_eq!(r.decision, "trade");
         assert!(r.reason.is_none());
@@ -260,7 +283,7 @@ mod tests {
         let m = market(None, None);
         let p = pricing();
         let d = Decision::NoTrade(NoTradeReason::NoOrderbook);
-        let r = record_from(&m, "NY", &p, &d, ts());
+        let r = record_from(&m, &ny_high_75(), &p, &d, ts());
 
         assert_eq!(r.decision, "no_trade");
         assert_eq!(r.reason.as_deref(), Some("no_orderbook"));
@@ -281,7 +304,7 @@ mod tests {
             spread: dec!(0.40),
             max: dec!(0.10),
         });
-        let r = record_from(&m, "NY", &p, &d, ts());
+        let r = record_from(&m, &ny_high_75(), &p, &d, ts());
 
         assert_eq!(r.reason.as_deref(), Some("spread_too_wide"));
         assert_eq!(r.spread, Some(dec!(0.40)));
@@ -297,7 +320,7 @@ mod tests {
             raw_edge: dec!(0.01),
             min: dec!(0.05),
         });
-        let r = record_from(&m, "NY", &p, &d, ts());
+        let r = record_from(&m, &ny_high_75(), &p, &d, ts());
 
         assert_eq!(r.reason.as_deref(), Some("edge_below_min"));
         assert_eq!(r.raw_edge, Some(dec!(0.01)));
@@ -312,7 +335,7 @@ mod tests {
             net_ev: dec!(0.003),
             required: dec!(0.20),
         });
-        let r = record_from(&m, "NY", &p, &d, ts());
+        let r = record_from(&m, &ny_high_75(), &p, &d, ts());
 
         assert_eq!(r.reason.as_deref(), Some("ev_below_gate"));
         assert_eq!(r.net_ev_per_contract, Some(dec!(0.003)));
@@ -329,7 +352,7 @@ mod tests {
         ));
         let logger = DecisionLogger::new(Some(dir.clone()));
         let m = market(Some(dec!(0.45)), Some(dec!(0.50)));
-        let r = record_from(&m, "NY", &pricing(), &trade_decision(), ts());
+        let r = record_from(&m, &ny_high_75(), &pricing(), &trade_decision(), ts());
 
         logger.record(&r).await.expect("record should succeed");
 
@@ -355,7 +378,7 @@ mod tests {
         let m = market(None, None);
         let r = record_from(
             &m,
-            "NY",
+            &ny_high_75(),
             &pricing(),
             &Decision::NoTrade(NoTradeReason::NoOrderbook),
             ts(),
@@ -375,7 +398,7 @@ mod tests {
         ));
         let logger = DecisionLogger::new(Some(dir.clone()));
         let m = market(Some(dec!(0.45)), Some(dec!(0.50)));
-        let r = record_from(&m, "NY", &pricing(), &trade_decision(), ts());
+        let r = record_from(&m, &ny_high_75(), &pricing(), &trade_decision(), ts());
         logger.record(&r).await.unwrap();
         logger.record(&r).await.unwrap();
 

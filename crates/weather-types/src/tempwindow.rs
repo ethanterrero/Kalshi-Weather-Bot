@@ -33,10 +33,7 @@ pub fn daily_low_window_utc(city: &CitySpec, date: NaiveDate) -> (DateTime<Utc>,
     standard_day_window_utc(city, date)
 }
 
-fn standard_day_window_utc(
-    city: &CitySpec,
-    date: NaiveDate,
-) -> (DateTime<Utc>, DateTime<Utc>) {
+fn standard_day_window_utc(city: &CitySpec, date: NaiveDate) -> (DateTime<Utc>, DateTime<Utc>) {
     let offset = city.standard_offset();
     let start_local = offset
         .from_local_datetime(&date.and_hms_opt(0, 0, 0).expect("00:00 always valid"))

@@ -159,6 +159,11 @@ impl DecisionLogger {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         line.push('\n');
         file.write_all(line.as_bytes()).await?;
+        // tokio::fs::File buffers internally and does NOT flush on drop, so
+        // a downstream reader (test, log shipper) may see an empty file
+        // momentarily without an explicit flush. Cheap; one line per
+        // record means there's no batching to preserve.
+        file.flush().await?;
         Ok(())
     }
 }
@@ -225,7 +230,7 @@ mod tests {
             net_ev_per_contract: dec!(0.085),
             required_net_ev: dec!(0.01),
         };
-        Decision::Trade(sig, ev)
+        Decision::Trade(sig, Box::new(ev))
     }
 
     #[test]

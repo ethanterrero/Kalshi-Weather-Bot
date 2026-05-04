@@ -74,10 +74,7 @@ impl NwsClient {
         })
     }
 
-    async fn get_json<T: for<'de> Deserialize<'de>>(
-        &self,
-        url: &str,
-    ) -> Result<T, ForecastError> {
+    async fn get_json<T: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<T, ForecastError> {
         let resp = self
             .client
             .get(url)
@@ -200,8 +197,12 @@ mod tests {
     #[test]
     fn parses_real_nws_forecast_response() {
         let parsed: ForecastResponse = serde_json::from_str(FIXTURE_FORECAST).unwrap();
-        let periods: Vec<ForecastPeriod> =
-            parsed.properties.periods.into_iter().map(period_from_raw).collect();
+        let periods: Vec<ForecastPeriod> = parsed
+            .properties
+            .periods
+            .into_iter()
+            .map(period_from_raw)
+            .collect();
 
         assert_eq!(periods.len(), 2);
         assert!(periods[0].is_daytime);

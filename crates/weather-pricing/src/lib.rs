@@ -30,8 +30,8 @@ use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 
 use weather_types::{
-    daily_high_window_utc, daily_low_window_utc, lookup_city, Forecast, ForecastPeriod,
-    TempStat, ThresholdDirection, WeatherThreshold,
+    daily_high_window_utc, daily_low_window_utc, lookup_city, Forecast, ForecastPeriod, TempStat,
+    ThresholdDirection, WeatherThreshold,
 };
 
 /// Why we couldn't model a market. These are surfaced in dry-run logs so the
@@ -106,7 +106,9 @@ pub fn price_market(
         .find(|p| period_overlaps_window(p, window_start, window_end))
         .ok_or(PricingError::NoMatchingForecastPeriod)?;
 
-    let horizon_days = (threshold.date - forecast.fetched_at.date_naive()).num_days().max(0);
+    let horizon_days = (threshold.date - forecast.fetched_at.date_naive())
+        .num_days()
+        .max(0);
     let sigma_f = sigma_for_horizon(horizon_days);
     let yes_p = yes_probability(chosen.temperature_f, threshold, sigma_f);
 

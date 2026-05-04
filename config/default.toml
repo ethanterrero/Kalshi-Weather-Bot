@@ -15,6 +15,11 @@ nws_base_url = "https://api.weather.gov"
 user_agent = "Kalshi-Weather-Bot (set-your-contact@example.com)"
 # How often to refresh forecasts (seconds).
 refresh_interval_secs = 1800
+# Lockout window after a fresh NWS forecast issue (seconds). Arb bots
+# reprice within seconds of an NWS update; sitting out the first 30 min
+# avoids being adversely selected. The clock is the NWS-published
+# `generatedAt`, not our local fetch time. Set to 0 to disable.
+nws_lockout_after_update_secs = 1800
 
 [scanner]
 # How often to refresh the Kalshi market list (seconds).
@@ -42,6 +47,12 @@ safety_buffer = "0.01"
 fee_multiplier = "1.0"
 # Max bid-ask spread we'll trade across. Beyond this, round-trip costs eat the edge.
 max_spread = "0.10"
+# Price band — tail-bracket contracts (cheap or near-1.00) carry asymmetric
+# blow-up risk. A $0.05 contract priced at 50% true still needs ~83% true
+# hit-rate to clear fees, and one losing tail event wipes out months of
+# small wins. Default 0.20–0.92 keeps us out of both ends.
+min_price = "0.20"
+max_price = "0.92"
 
 [risk]
 # Hard caps. v1 is intentionally tiny — directional weather edges are noisy and

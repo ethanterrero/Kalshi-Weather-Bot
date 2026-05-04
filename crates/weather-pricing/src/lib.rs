@@ -202,6 +202,7 @@ mod tests {
             lat: 40.78,
             lon: -73.97,
             fetched_at: dt("2026-07-03T12:00:00Z"),
+            generated_at: None,
             periods: vec![
                 ForecastPeriod {
                     name: "Saturday".into(),

@@ -81,6 +81,12 @@ pub struct Forecast {
     pub lat: f64,
     pub lon: f64,
     pub fetched_at: DateTime<Utc>,
+    /// When NWS generated this forecast (`properties.updateTime` /
+    /// `generatedAt`). Distinct from `fetched_at`: NWS may have issued the
+    /// forecast 90 min ago and we just polled it. Backtests and lockout
+    /// windows want the *issue* time, not our fetch time.
+    #[serde(default)]
+    pub generated_at: Option<DateTime<Utc>>,
     pub periods: Vec<ForecastPeriod>,
 }
 

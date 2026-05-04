@@ -1,4 +1,4 @@
-//! NOAA NWS forecast client.
+//! NOAA NWS forecast client + Iowa State IEM CLI fetcher.
 //!
 //! NWS doesn't take a single (lat, lon) → forecast request. The flow is:
 //!   1. `GET /points/{lat},{lon}` → metadata including `properties.forecast`
@@ -7,6 +7,13 @@
 //!
 //! NWS rejects requests without a meaningful User-Agent, so all requests go
 //! through `NwsClient::new(base_url, user_agent)`.
+//!
+//! Realised settlement values come from the daily NWS CLI product. See the
+//! [`cli`] module for the IEM-backed fetcher and parser.
+
+pub mod cli;
+
+pub use cli::{parse_cli_json, CliError, CliReport, IemCliClient};
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;

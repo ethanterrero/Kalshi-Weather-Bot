@@ -58,3 +58,7 @@ max_concurrent_requests = 5
 [logging]
 level = "info"
 json_output = false
+# Per-day JSONL log of every strategy decision (trade or no-trade), one row
+# per market per pass. Substrate for backtests + model calibration. Set to
+# the empty string or omit the key to disable persistence.
+decision_log_dir = "logs/decisions"

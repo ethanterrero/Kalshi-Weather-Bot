@@ -130,6 +130,15 @@ pub struct MonitorConfig {
 pub struct LoggingConfig {
     pub level: String,
     pub json_output: bool,
+    /// Directory for the per-day JSONL decision log (one row per market per
+    /// strategy pass). `None` disables persistence; default is
+    /// `logs/decisions`. Backtests and calibration both feed off this file.
+    #[serde(default = "default_decision_log_dir")]
+    pub decision_log_dir: Option<String>,
+}
+
+fn default_decision_log_dir() -> Option<String> {
+    Some("logs/decisions".to_string())
 }
 
 impl AppConfig {

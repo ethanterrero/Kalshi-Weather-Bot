@@ -2464,6 +2464,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "weather-forecast",
+ "weather-pricing",
  "weather-types",
 ]
 

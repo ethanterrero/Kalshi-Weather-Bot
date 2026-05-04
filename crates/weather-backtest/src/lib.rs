@@ -18,6 +18,10 @@
 //! the new fields when that day comes; today the schema is fresh enough
 //! we don't need it yet).
 
+pub mod historical;
+
+pub use historical::{historical_calibration, model_p_yes, CalibrationPlan};
+
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::Deserialize;

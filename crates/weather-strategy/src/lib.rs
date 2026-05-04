@@ -332,6 +332,7 @@ mod tests {
             sigma_f: 2.0,
             horizon_days: 1,
             settlement_station: "KNYC",
+            sigma_source: "static",
         }
     }
 

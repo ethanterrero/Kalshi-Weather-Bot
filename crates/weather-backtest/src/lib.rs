@@ -58,6 +58,8 @@ pub struct DecisionRow {
     pub horizon_days: i64,
     pub forecast_temp_f: i32,
     pub sigma_f: f64,
+    /// `"gefs_ensemble"` or `"static"`. See `weather_pricing::ModelPricing::sigma_source`.
+    pub sigma_source: String,
     pub model_p_yes: Decimal,
     pub yes_bid: Option<Decimal>,
     pub yes_ask: Option<Decimal>,
@@ -271,6 +273,7 @@ mod tests {
             horizon_days: 1,
             forecast_temp_f: forecast_temp,
             sigma_f: 2.0,
+            sigma_source: "static".to_string(),
             model_p_yes: model_p,
             yes_bid: None,
             yes_ask: None,
@@ -324,7 +327,7 @@ mod tests {
         // Use the same serde shape weather-bot writes; here we hand-roll a
         // matching JSON literal to assert we can read what they emit.
         let line = format!(
-            r#"{{"ts":"{}","ticker":"X","city":"NY","settlement_station":"KNYC","stat":"daily_high","direction":"at_or_above","strike_temperature_f":75,"resolution_date":"2026-07-04","horizon_days":1,"forecast_temp_f":78,"sigma_f":2.0,"model_p_yes":"0.65","yes_bid":null,"yes_ask":null,"spread":null,"decision":"trade","reason":null,"side":"yes","limit_price":null,"contracts":null,"fee_estimate":null,"raw_edge":null,"net_ev_per_contract":null,"market_p_implied":null}}"#,
+            r#"{{"ts":"{}","ticker":"X","city":"NY","settlement_station":"KNYC","stat":"daily_high","direction":"at_or_above","strike_temperature_f":75,"resolution_date":"2026-07-04","horizon_days":1,"forecast_temp_f":78,"sigma_f":2.0,"sigma_source":"static","model_p_yes":"0.65","yes_bid":null,"yes_ask":null,"spread":null,"decision":"trade","reason":null,"side":"yes","limit_price":null,"contracts":null,"fee_estimate":null,"raw_edge":null,"net_ev_per_contract":null,"market_p_implied":null}}"#,
             r.ts.to_rfc3339()
         );
         let parsed = parse_decisions_text(&line).unwrap();

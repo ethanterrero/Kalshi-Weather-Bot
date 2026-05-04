@@ -40,6 +40,10 @@ pub struct DecisionRecord {
     pub horizon_days: i64,
     pub forecast_temp_f: i32,
     pub sigma_f: f64,
+    /// Where σ came from: `"gefs_ensemble"` or `"static"`. Backtester
+    /// splits metrics on this so we can tell whether ensemble σ moves
+    /// the calibration needle.
+    pub sigma_source: String,
     pub model_p_yes: Decimal,
     pub yes_bid: Option<Decimal>,
     pub yes_ask: Option<Decimal>,
@@ -87,6 +91,7 @@ pub fn record_from(
         horizon_days: pricing.horizon_days,
         forecast_temp_f: pricing.forecast_temp_f,
         sigma_f: pricing.sigma_f,
+        sigma_source: pricing.sigma_source.to_string(),
         model_p_yes: pricing.yes_probability,
         yes_bid,
         yes_ask,
@@ -222,6 +227,7 @@ mod tests {
             sigma_f: 2.0,
             horizon_days: 1,
             settlement_station: "KNYC",
+            sigma_source: "static",
         }
     }
 

@@ -10,10 +10,19 @@
 //!
 //! Realised settlement values come from the daily NWS CLI product. See the
 //! [`cli`] module for the IEM-backed fetcher and parser.
+//!
+//! Ensemble (μ, σ) per (city, day) — the substrate for replacing
+//! `weather-pricing::sigma_for_horizon` — comes from GEFS via Open-Meteo's
+//! `/v1/ensemble` endpoint. See the [`gefs`] module.
 
 pub mod cli;
+pub mod gefs;
 
 pub use cli::{parse_cli_json, CliError, CliReport, IemCliClient};
+pub use gefs::{
+    daily_high_stats, daily_low_stats, parse_ensemble_json, EnsembleForecast, EnsembleStat,
+    GefsClient, GefsError,
+};
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;

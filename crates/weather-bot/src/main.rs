@@ -11,6 +11,7 @@ use tracing::{info, warn};
 use weather_config::{AppConfig, ExecutionMode};
 use weather_forecast::NwsClient;
 use weather_pricing::{price_market, PricingError};
+use weather_risk::{RiskDecision, RiskManager};
 use weather_scanner::MarketScanner;
 use weather_strategy::{decide, Decision, FeeModel, NoTradeReason};
 use weather_types::{lookup_city, Forecast};
@@ -95,6 +96,13 @@ async fn main() -> Result<()> {
     let nws_for_strat = nws.clone();
     let cache_for_strat = forecast_cache.clone();
     let logger_for_strat = decision_logger.clone();
+    let mut risk_for_strat = RiskManager::new(config.risk.clone());
+    info!(
+        max_position_size_usd = %config.risk.max_position_size_usd,
+        max_total_exposure_usd = %config.risk.max_total_exposure_usd,
+        max_concurrent_positions = config.risk.max_concurrent_positions,
+        "risk caps active"
+    );
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(poll_ms));
         interval.tick().await;
@@ -106,6 +114,7 @@ async fn main() -> Result<()> {
                 &cache_for_strat,
                 &cfg_for_strat,
                 &logger_for_strat,
+                &mut risk_for_strat,
             )
             .await;
         }
@@ -126,6 +135,7 @@ async fn run_strategy_pass(
     cache: &ForecastCache,
     cfg: &AppConfig,
     logger: &DecisionLogger,
+    risk: &mut RiskManager,
 ) {
     let snapshot = {
         let lock = scanner.markets();
@@ -135,6 +145,11 @@ async fn run_strategy_pass(
     if snapshot.is_empty() {
         return;
     }
+
+    // Each pass starts with a clean risk tally — dry-run has no fill
+    // confirmations to persist between passes. When live trading lands this
+    // gets replaced with a snapshot pulled from /portfolio/positions.
+    risk.reset_for_pass();
 
     let fees = FeeModel {
         multiplier: cfg.strategy.fee_multiplier,
@@ -206,6 +221,48 @@ async fn run_strategy_pass(
         }
 
         log_decision(&tracked.market.ticker, &pricing, &decision);
+
+        // Run Trade signals through the risk layer. Position-size and
+        // total-exposure caps may clip the contract count; the concurrent-
+        // positions cap may reject outright.
+        if let Decision::Trade(sig, _) = &decision {
+            apply_risk(risk, sig);
+        }
+    }
+}
+
+fn apply_risk(risk: &mut RiskManager, signal: &weather_types::Signal) {
+    let original_contracts = signal.contracts;
+    match risk.evaluate(signal.clone()) {
+        RiskDecision::Approve(s) => {
+            info!(
+                ticker = %s.market_ticker,
+                contracts = s.contracts,
+                limit_price = %s.limit_price,
+                pass_exposure_usd = %risk.pass_exposure_usd(),
+                "risk: approved"
+            );
+        }
+        RiskDecision::Adjusted(s, reason) => {
+            info!(
+                ticker = %s.market_ticker,
+                contracts = s.contracts,
+                original_contracts,
+                limit_price = %s.limit_price,
+                reason = ?reason,
+                pass_exposure_usd = %risk.pass_exposure_usd(),
+                "risk: clipped position size"
+            );
+        }
+        RiskDecision::Reject(reason) => {
+            info!(
+                ticker = %signal.market_ticker,
+                reason = ?reason,
+                pass_exposure_usd = %risk.pass_exposure_usd(),
+                pass_position_count = risk.pass_position_count(),
+                "risk: rejected"
+            );
+        }
     }
 }
 

@@ -86,6 +86,23 @@ pub fn price_market(
     threshold: &WeatherThreshold,
     forecast: &Forecast,
 ) -> Result<ModelPricing, PricingError> {
+    price_market_with_sigma(threshold, forecast, None)
+}
+
+/// Same as [`price_market`], but lets the caller override the σ used in
+/// the Normal-CDF. When `sigma_override` is `None` we fall back to the
+/// hand-calibrated `sigma_for_horizon(horizon_days)` table — that's the
+/// historical default, kept for backwards compatibility.
+///
+/// The override exists so the bot can plug in a per-(city, day) σ
+/// derived from a real ensemble (GEFS / ECMWF) instead of the static
+/// table. Pricing math is otherwise identical: same window selection,
+/// same continuity correction, same period-overlap rule.
+pub fn price_market_with_sigma(
+    threshold: &WeatherThreshold,
+    forecast: &Forecast,
+    sigma_override: Option<f64>,
+) -> Result<ModelPricing, PricingError> {
     let city = lookup_city(&threshold.city)
         .ok_or_else(|| PricingError::UnknownCity(threshold.city.clone()))?;
 
@@ -109,7 +126,7 @@ pub fn price_market(
     let horizon_days = (threshold.date - forecast.fetched_at.date_naive())
         .num_days()
         .max(0);
-    let sigma_f = sigma_for_horizon(horizon_days);
+    let sigma_f = sigma_override.unwrap_or_else(|| sigma_for_horizon(horizon_days));
     let yes_p = yes_probability(chosen.temperature_f, threshold, sigma_f);
 
     Ok(ModelPricing {
@@ -312,5 +329,43 @@ mod tests {
         let p_near = 1.0 - normal_cdf((70.0 - 75.0) / near);
         let p_far = 1.0 - normal_cdf((70.0 - 75.0) / far);
         assert!(p_near > p_far);
+    }
+
+    #[test]
+    fn sigma_override_is_used_in_place_of_horizon_table() {
+        let f = nyc_july4_forecast(75);
+        let m = high_threshold(75, ThresholdDirection::AtOrAbove);
+        let with_override = price_market_with_sigma(&m, &f, Some(4.0)).unwrap();
+        let without_override = price_market_with_sigma(&m, &f, None).unwrap();
+
+        // Override = 4.0 should be reflected verbatim, regardless of horizon.
+        assert!((with_override.sigma_f - 4.0).abs() < 1e-9);
+        // Static fallback uses sigma_for_horizon(horizon). For July 4 with
+        // a forecast fetched July 3 (horizon = 1), that's 2.0.
+        assert!((without_override.sigma_f - 2.0).abs() < 1e-9);
+
+        // A wider σ pushes P(YES) at-the-money toward 0.5.
+        let pf_with: f64 = with_override.yes_probability.try_into().unwrap();
+        let pf_without: f64 = without_override.yes_probability.try_into().unwrap();
+        // Wider σ → at the strike, the same continuity correction yields a
+        // probability closer to 0.5 than the narrower σ does.
+        assert!(
+            (pf_with - 0.5).abs() < (pf_without - 0.5).abs(),
+            "with σ=4.0 P should be closer to 0.5 than with σ=2.0; got {} vs {}",
+            pf_with,
+            pf_without
+        );
+    }
+
+    #[test]
+    fn price_market_default_path_matches_explicit_none_override() {
+        let f = nyc_july4_forecast(82);
+        let m = high_threshold(75, ThresholdDirection::AtOrAbove);
+        let a = price_market(&m, &f).unwrap();
+        let b = price_market_with_sigma(&m, &f, None).unwrap();
+        assert_eq!(a.yes_probability, b.yes_probability);
+        assert_eq!(a.sigma_f, b.sigma_f);
+        assert_eq!(a.forecast_temp_f, b.forecast_temp_f);
+        assert_eq!(a.horizon_days, b.horizon_days);
     }
 }

@@ -20,6 +20,14 @@ refresh_interval_secs = 1800
 # avoids being adversely selected. The clock is the NWS-published
 # `generatedAt`, not our local fetch time. Set to 0 to disable.
 nws_lockout_after_update_secs = 1800
+# Use GEFS ensemble σ (Open-Meteo, 30 perturbed members) in pricing
+# instead of the hand-calibrated sigma_for_horizon table. Static table is
+# kept as a fallback for any (city, date, stat) without enough live
+# members, so flipping this on is safe. Default true.
+gefs_sigma_enabled = true
+# GEFS refresh cadence (seconds). GEFS publishes new runs every ~6h;
+# 1800 = 30 min gives us at most one stale window per run.
+gefs_refresh_interval_secs = 1800
 
 [scanner]
 # How often to refresh the Kalshi market list (seconds).

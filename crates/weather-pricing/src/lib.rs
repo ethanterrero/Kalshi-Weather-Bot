@@ -79,7 +79,19 @@ pub struct ModelPricing {
     /// ICAO of the NWS station Kalshi settles on, validated against the
     /// city table. Surfaced so logs show a settlement-source check.
     pub settlement_station: &'static str,
+    /// Where σ came from: `"gefs_ensemble"` when the caller supplied an
+    /// override (typically derived from real ensemble spread), `"static"`
+    /// when the hand-calibrated `sigma_for_horizon` table was used. The
+    /// JSONL backtester splits metrics on this so we can tell whether
+    /// ensemble σ moves the calibration needle.
+    pub sigma_source: &'static str,
 }
+
+/// Source tags for [`ModelPricing::sigma_source`]. Kept as constants
+/// rather than an enum so the field stays a `&'static str` (matches
+/// `settlement_station`) — the JSONL layer just stringifies it.
+pub const SIGMA_SOURCE_STATIC: &str = "static";
+pub const SIGMA_SOURCE_GEFS_ENSEMBLE: &str = "gefs_ensemble";
 
 /// Compute a model probability for a single Kalshi weather market.
 pub fn price_market(
@@ -126,7 +138,10 @@ pub fn price_market_with_sigma(
     let horizon_days = (threshold.date - forecast.fetched_at.date_naive())
         .num_days()
         .max(0);
-    let sigma_f = sigma_override.unwrap_or_else(|| sigma_for_horizon(horizon_days));
+    let (sigma_f, sigma_source) = match sigma_override {
+        Some(s) => (s, SIGMA_SOURCE_GEFS_ENSEMBLE),
+        None => (sigma_for_horizon(horizon_days), SIGMA_SOURCE_STATIC),
+    };
     let yes_p = yes_probability(chosen.temperature_f, threshold, sigma_f);
 
     Ok(ModelPricing {
@@ -135,6 +150,7 @@ pub fn price_market_with_sigma(
         sigma_f,
         horizon_days,
         settlement_station: city.icao,
+        sigma_source,
     })
 }
 
@@ -340,9 +356,11 @@ mod tests {
 
         // Override = 4.0 should be reflected verbatim, regardless of horizon.
         assert!((with_override.sigma_f - 4.0).abs() < 1e-9);
+        assert_eq!(with_override.sigma_source, "gefs_ensemble");
         // Static fallback uses sigma_for_horizon(horizon). For July 4 with
         // a forecast fetched July 3 (horizon = 1), that's 2.0.
         assert!((without_override.sigma_f - 2.0).abs() < 1e-9);
+        assert_eq!(without_override.sigma_source, "static");
 
         // A wider σ pushes P(YES) at-the-money toward 0.5.
         let pf_with: f64 = with_override.yes_probability.try_into().unwrap();

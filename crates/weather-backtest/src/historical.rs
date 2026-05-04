@@ -156,6 +156,9 @@ fn synth_decision(
         horizon_days: 0,
         forecast_temp_f: forecast_temp,
         sigma_f,
+        // Synthetic decisions don't fetch ensemble — every synth row is
+        // attributed to the static σ source by definition.
+        sigma_source: "static".to_string(),
         model_p_yes: p_dec,
         yes_bid: None,
         yes_ask: None,

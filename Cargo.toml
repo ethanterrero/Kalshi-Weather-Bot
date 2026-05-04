@@ -10,6 +10,7 @@ members = [
     "crates/weather-strategy",
     "crates/weather-risk",
     "crates/weather-executor",
+    "crates/weather-backtest",
     "crates/weather-bot",
 ]
 

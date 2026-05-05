@@ -7,9 +7,14 @@ edition = "2021"
 name = "calibrate"
 path = "src/bin/calibrate.rs"
 
+[[bin]]
+name = "replay"
+path = "src/bin/replay.rs"
+
 [dependencies]
 weather-forecast = { path = "../weather-forecast" }
 weather-pricing = { path = "../weather-pricing" }
+weather-scanner = { path = "../weather-scanner" }
 weather-types = { path = "../weather-types" }
 
 anyhow = { workspace = true }

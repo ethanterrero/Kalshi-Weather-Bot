@@ -80,7 +80,7 @@ impl NwsClient {
             .forecast
             .ok_or(ForecastError::Missing("properties.forecast"))?;
         let body: ForecastResponse = self.get_json(&forecast_url).await?;
-        let generated_at = body.properties.generated_at;
+        let generated_at = body.properties.issue_time();
         let periods = body
             .properties
             .periods
@@ -159,11 +159,20 @@ struct ForecastResponse {
 #[serde(rename_all = "camelCase")]
 struct ForecastProperties {
     /// When NWS *issued* this forecast. Distinct from when we polled it.
-    /// `generatedAt` is the field exposed in the GeoJSON properties block;
-    /// older NWS responses use `updateTime` — accept either.
-    #[serde(default, alias = "updateTime")]
+    /// NWS can send both `generatedAt` and `updateTime`; keep them as
+    /// separate wire fields so serde doesn't reject the payload as a
+    /// duplicate, then prefer `generatedAt` in `issue_time`.
+    #[serde(default)]
     generated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    update_time: Option<DateTime<Utc>>,
     periods: Vec<RawPeriod>,
+}
+
+impl ForecastProperties {
+    fn issue_time(&self) -> Option<DateTime<Utc>> {
+        self.generated_at.or(self.update_time)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -197,6 +206,7 @@ mod tests {
     /// nullable `probabilityOfPrecipitation.value`.
     const FIXTURE_FORECAST: &str = r#"{
         "properties": {
+            "generatedAt": "2026-04-26T11:45:00+00:00",
             "periods": [
                 {
                     "name": "Today",
@@ -225,6 +235,12 @@ mod tests {
     #[test]
     fn parses_real_nws_forecast_response() {
         let parsed: ForecastResponse = serde_json::from_str(FIXTURE_FORECAST).unwrap();
+        assert_eq!(
+            parsed.properties.issue_time().unwrap(),
+            DateTime::parse_from_rfc3339("2026-04-26T11:45:00+00:00")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
         let periods: Vec<ForecastPeriod> = parsed
             .properties
             .periods
@@ -240,5 +256,40 @@ mod tests {
         assert_eq!(periods[1].temperature_f, 54);
         // Null PoP must round-trip to None, not 0.
         assert_eq!(periods[1].precipitation_probability_pct, None);
+    }
+
+    #[test]
+    fn nws_forecast_accepts_generated_at_and_update_time_together() {
+        let payload = r#"{
+            "properties": {
+                "generatedAt": "2026-05-05T04:00:00+00:00",
+                "updateTime": "2026-05-05T03:55:00+00:00",
+                "periods": []
+            }
+        }"#;
+        let parsed: ForecastResponse = serde_json::from_str(payload).unwrap();
+        assert_eq!(
+            parsed.properties.issue_time().unwrap(),
+            DateTime::parse_from_rfc3339("2026-05-05T04:00:00+00:00")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+    }
+
+    #[test]
+    fn nws_forecast_falls_back_to_update_time() {
+        let payload = r#"{
+            "properties": {
+                "updateTime": "2026-05-05T03:55:00+00:00",
+                "periods": []
+            }
+        }"#;
+        let parsed: ForecastResponse = serde_json::from_str(payload).unwrap();
+        assert_eq!(
+            parsed.properties.issue_time().unwrap(),
+            DateTime::parse_from_rfc3339("2026-05-05T03:55:00+00:00")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
     }
 }

@@ -168,6 +168,9 @@ async fn run_strategy_pass(
         return;
     }
 
+    let scanned = snapshot.len();
+    let mut summary = PassSummary::default();
+
     // Each pass starts with a clean risk tally — dry-run has no fill
     // confirmations to persist between passes. When live trading lands this
     // gets replaced with a snapshot pulled from /portfolio/positions.
@@ -184,6 +187,7 @@ async fn run_strategy_pass(
         let Some(city) = lookup_city(city_code) else {
             warn!(city = city_code, ticker = %tracked.market.ticker,
                 "skipping: city not in mapping table; cannot validate NWS settlement station");
+            summary.unknown_city += 1;
             continue;
         };
 
@@ -211,6 +215,7 @@ async fn run_strategy_pass(
                 }
                 Err(e) => {
                     warn!(city = city_code, error = %e, "NWS forecast fetch failed");
+                    summary.forecast_fetch_failed += 1;
                     continue;
                 }
             }
@@ -220,7 +225,10 @@ async fn run_strategy_pass(
             let read = cache.read().await;
             match read.get(city_code) {
                 Some((f, _)) => f.clone(),
-                None => continue,
+                None => {
+                    summary.forecast_fetch_failed += 1;
+                    continue;
+                }
             }
         };
 
@@ -239,13 +247,16 @@ async fn run_strategy_pass(
             Ok(p) => p,
             Err(PricingError::NoMatchingForecastPeriod) => {
                 // Common case: market is more than 7 days out (NWS horizon).
+                summary.outside_horizon += 1;
                 continue;
             }
             Err(e) => {
                 warn!(ticker = %tracked.market.ticker, error = %e, "pricing failed");
+                summary.pricing_failed += 1;
                 continue;
             }
         };
+        summary.priced += 1;
 
         // NWS-update lockout: if the forecast we're pricing against was
         // issued in the last `nws_lockout_after_update_secs`, sit out the
@@ -257,6 +268,7 @@ async fn run_strategy_pass(
                 Some(reason) => Decision::NoTrade(reason),
                 None => decide(&tracked.market, &pricing, &cfg.strategy, &fees),
             };
+        summary.tally_decision(&decision);
 
         let record = record_from(
             &tracked.market,
@@ -277,6 +289,65 @@ async fn run_strategy_pass(
         if let Decision::Trade(sig, _) = &decision {
             apply_risk(risk, sig);
         }
+    }
+
+    summary.emit(scanned);
+}
+
+/// Per-strategy-pass tally. One INFO log line at end-of-pass so the
+/// operator can read a single line per cycle instead of counting
+/// individual decision lines. Fields line up roughly with the JSONL
+/// `reason` tags so an `awk`/`jq` consumer can cross-check.
+#[derive(Debug, Default)]
+struct PassSummary {
+    priced: usize,
+    traded: usize,
+    no_orderbook: usize,
+    spread_too_wide: usize,
+    edge_below_min: usize,
+    ev_below_gate: usize,
+    price_out_of_band: usize,
+    forecast_too_fresh: usize,
+    /// Markets skipped before pricing — kept separately so `priced` is a
+    /// clean denominator for "% of priced markets that traded".
+    unknown_city: usize,
+    outside_horizon: usize,
+    forecast_fetch_failed: usize,
+    pricing_failed: usize,
+}
+
+impl PassSummary {
+    fn tally_decision(&mut self, decision: &Decision) {
+        match decision {
+            Decision::Trade(_, _) => self.traded += 1,
+            Decision::NoTrade(reason) => match reason {
+                NoTradeReason::NoOrderbook => self.no_orderbook += 1,
+                NoTradeReason::SpreadTooWide { .. } => self.spread_too_wide += 1,
+                NoTradeReason::EdgeBelowMin { .. } => self.edge_below_min += 1,
+                NoTradeReason::EvBelowGate { .. } => self.ev_below_gate += 1,
+                NoTradeReason::PriceOutOfBand { .. } => self.price_out_of_band += 1,
+                NoTradeReason::ForecastTooFresh { .. } => self.forecast_too_fresh += 1,
+            },
+        }
+    }
+
+    fn emit(&self, scanned: usize) {
+        info!(
+            scanned,
+            priced = self.priced,
+            traded = self.traded,
+            no_orderbook = self.no_orderbook,
+            spread_too_wide = self.spread_too_wide,
+            edge_below_min = self.edge_below_min,
+            ev_below_gate = self.ev_below_gate,
+            price_out_of_band = self.price_out_of_band,
+            forecast_too_fresh = self.forecast_too_fresh,
+            unknown_city = self.unknown_city,
+            outside_horizon = self.outside_horizon,
+            forecast_fetch_failed = self.forecast_fetch_failed,
+            pricing_failed = self.pricing_failed,
+            "strategy pass complete"
+        );
     }
 }
 
@@ -504,5 +575,66 @@ mod tests {
         let issued = Utc::now() + chrono::Duration::minutes(10);
         let f = forecast_with(Some(issued));
         assert!(nws_lockout_decision(&f, 1800).is_none());
+    }
+
+    // Pass-summary tally tests. We avoid constructing real Decision::Trade
+    // values (the EvBreakdown is verbose) and instead exercise NoTrade for
+    // each variant; the Trade path is one line in tally_decision and is
+    // covered transitively by the strategy crate's own Trade tests.
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn pass_summary_starts_at_zero() {
+        let s = PassSummary::default();
+        assert_eq!(s.priced, 0);
+        assert_eq!(s.traded, 0);
+        assert_eq!(s.edge_below_min, 0);
+    }
+
+    #[test]
+    fn tally_decision_increments_per_no_trade_variant() {
+        let mut s = PassSummary::default();
+        s.tally_decision(&Decision::NoTrade(NoTradeReason::NoOrderbook));
+        s.tally_decision(&Decision::NoTrade(NoTradeReason::SpreadTooWide {
+            spread: dec!(0.20),
+            max: dec!(0.10),
+        }));
+        s.tally_decision(&Decision::NoTrade(NoTradeReason::EdgeBelowMin {
+            raw_edge: dec!(0.02),
+            min: dec!(0.05),
+        }));
+        s.tally_decision(&Decision::NoTrade(NoTradeReason::EvBelowGate {
+            net_ev: dec!(0.005),
+            required: dec!(0.01),
+        }));
+        s.tally_decision(&Decision::NoTrade(NoTradeReason::PriceOutOfBand {
+            price: dec!(0.05),
+            min: dec!(0.20),
+            max: dec!(0.92),
+        }));
+        s.tally_decision(&Decision::NoTrade(NoTradeReason::ForecastTooFresh {
+            age_secs: 120,
+            lockout_secs: 1800,
+        }));
+
+        assert_eq!(s.no_orderbook, 1);
+        assert_eq!(s.spread_too_wide, 1);
+        assert_eq!(s.edge_below_min, 1);
+        assert_eq!(s.ev_below_gate, 1);
+        assert_eq!(s.price_out_of_band, 1);
+        assert_eq!(s.forecast_too_fresh, 1);
+        assert_eq!(s.traded, 0);
+    }
+
+    #[test]
+    fn tally_decision_groups_repeats_into_one_counter() {
+        let mut s = PassSummary::default();
+        for _ in 0..5 {
+            s.tally_decision(&Decision::NoTrade(NoTradeReason::EdgeBelowMin {
+                raw_edge: dec!(0.02),
+                min: dec!(0.05),
+            }));
+        }
+        assert_eq!(s.edge_below_min, 5);
     }
 }

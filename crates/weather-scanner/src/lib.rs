@@ -5,6 +5,10 @@
 //! 2026-04-26. Kalshi's `/markets` endpoint is public (no auth), paginates
 //! via a `cursor` field, and accepts `series_ticker=...&status=open`.
 
+pub mod candles;
+
+pub use candles::{BookOhlc, Candlestick, CandlesticksResponse, PeriodInterval, TradeOhlc};
+
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -47,6 +51,16 @@ impl KalshiClient {
             http: reqwest::Client::new(),
             base_url,
         }
+    }
+
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Wrapper exposing `get_with_retry` to sibling modules in this
+    /// crate without leaking it to consumers.
+    pub(crate) async fn get_with_retry_pub(&self, url: &str) -> Result<bytes::Bytes, ScannerError> {
+        self.get_with_retry(url).await
     }
 
     /// Fetch all open markets for `series_ticker`, auto-paginating through

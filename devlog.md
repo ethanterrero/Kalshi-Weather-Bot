@@ -197,7 +197,7 @@ was small here, but the pattern is worth flagging — adopt it as a
 rebase discipline for the next round of stacked PRs.
 
 ### State after sweep 1
-- 11-crate workspace; 89 unit tests + 3 ignored live-network integration
+- At that point: 11-crate workspace; 89 unit tests + 3 ignored live-network integration
   tests (CLI, GEFS, Kalshi-auth).
 - CI green on every PR through #11.
 - Bot still in dry-run; static σ table still in use; executor not yet
@@ -244,7 +244,7 @@ would have produced meaningless calibration metrics — passed on it.
    - 30-min post-NWS-update lockout: arb bots reprice within seconds of
      each NWS issue. `weather-types::Forecast` grew an
      `Option<DateTime<Utc>> generated_at`; `weather-forecast` parses
-     `properties.generatedAt` (with `updateTime` as alias);
+     `properties.generatedAt` (with `updateTime` fallback);
      `main.rs::nws_lockout_decision` short-circuits trades inside the
      window with `NoTradeReason::ForecastTooFresh`.
 2. **PR #13 — Open-Meteo historical-forecast + Phase A substrate.**
@@ -294,7 +294,7 @@ data accumulates.
 
 ### State after sweep 2
 - 12 PRs total this session (#5 through #16).
-- 11-crate workspace; **116 unit tests** + 3 ignored live-network tests.
+- At that point: 11-crate workspace; **116 unit tests** + 3 ignored live-network tests.
 - CI gates: `fmt --check`, `clippy -D warnings`, `build --locked`,
   `test --locked` enforced on every PR.
 - Bot end-to-end runnable in dry-run with: NWS deterministic forecasts,
@@ -310,15 +310,55 @@ Per the new "near-term" priority list at the bottom of `ROADMAP.md`:
 1. **Run the bot in dry-run for ~2 weeks.** No code change.
    `cargo run -p weather-bot` accumulates `logs/decisions/*.jsonl`.
    Don't add new sources or strategies on top of an unmeasured baseline.
-2. **JSONL replay binary.** Splits `metrics()` by `sigma_source` so we
-   can answer the empirical question PR #15 set up: did GEFS σ help vs
-   the static table? Small follow-up.
-3. **Reconcile our station table against settled Kalshi markets.**
+2. **Reconcile our station table against settled Kalshi markets.**
    Phase 1's open item — pull the last 30 days of resolved KXHIGH/KXLOW
    from Kalshi, diff against IEM CLI.
-4. **Wire executor into strategy loop.** Behind `mode = "live"` and the
+3. **Wire executor into strategy loop.** Behind `mode = "live"` and the
    existing `never_send` kill-switch.
 
-Items 1–2 unblock everything else: without measured calibration we'd be
+Item 1 still gates everything else: without measured calibration we'd be
 adding code on top of an unverified model.
 
+---
+
+## 2026-05-05 — Replay diagnostics + NWS timestamp parser fix
+
+The first live dry-run surfaced two operational issues quickly:
+
+1. NWS forecast payloads can include both `properties.generatedAt` and
+   `properties.updateTime`. Our parser had modeled `updateTime` as a serde
+   alias for `generatedAt`, so a payload carrying both fields failed with
+   `duplicate field generatedAt`. The fix keeps them as separate optional
+   wire fields, prefers `generatedAt`, and falls back to `updateTime`.
+2. The first replay output looked like "all losses" because it marked every
+   repeated dry-run Trade row to the bid-side liquidation price inside the
+   same candle. In dry-run, the bot has no order lifecycle or fill state, so
+   the same opportunity can be emitted every pass. Immediate bid-side marks
+   mostly measure spread + entry fee friction, not resolved strategy P&L.
+
+### What landed
+
+- **`weather-backtest --bin replay`** reads one or more decision JSONL files
+  or directories, prints row counts by `sigma_source`, optionally joins IEM
+  CLI outcomes for resolved calibration metrics, and optionally fetches
+  Kalshi candles for an immediate spread/fee mark.
+- Replay **dedupes repeated Trade emissions** into unique opportunities using
+  `(ticker, side, limit_price, contracts)` before candle marking, while still
+  reporting the raw Trade row count and how many rows were collapsed.
+- The candle section is now explicitly labelled
+  **"Immediate candle spread/fee mark"** and prints a warning that it is not
+  realised strategy P&L.
+- `weather-scanner::candles` is now used by replay for recent Kalshi
+  candlesticks. Older long-window backtests still need Kalshi's historical
+  candle endpoint or an archive path.
+
+### State after this fix
+
+- Dry-run plumbing verified live: market scan succeeded, NWS forecasts parsed,
+  GEFS σ rows were logged, `forecast_fetch_failed=0`, and per-pass summaries
+  showed priced markets and explicit no-trade reasons.
+- Workspace checks green: `cargo fmt --all`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, and
+  `cargo test --workspace --locked`.
+- Current replay is good for operational sanity and resolved calibration once
+  CLI reports are available. It is not yet a fill-aware P&L backtester.

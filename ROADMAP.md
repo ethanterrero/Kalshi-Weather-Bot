@@ -18,23 +18,26 @@ in parallel with its neighbours where dependencies allow.
 
 ---
 
-## Where we are today (post-PR #16)
+## Where we are today (post-replay/NWS parser fix)
 
 Anchored to current `main` so this section ages well — verify with `cargo
 test --workspace` and a quick repo skim before reusing.
 
 - **11-crate** Rust workspace (`weather-backtest` joined the original ten);
   `cargo build --workspace` clean; `cargo test --workspace --locked` runs
-  **116 unit tests + 3 ignored** live-network integration tests. CI
+  **133 unit tests + 5 ignored** live-network integration tests. CI
   enforces `fmt --check`, `clippy -D warnings`, `build --locked`,
   `test --locked` on every PR via [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 - `weather-scanner`: paginating, 429-retrying Kalshi `/markets` client +
-  ticker parser pinned to live demo-api responses.
+  ticker parser pinned to live demo-api responses. Also exposes a recent
+  Kalshi `/series/{series}/markets/{ticker}/candlesticks` fetcher for replay
+  diagnostics.
 - `weather-forecast`: four sources, all verified live before parsers were
   written.
   - `NwsClient` — 7-day deterministic point forecast (`/points` →
-    `/gridpoints/.../forecast`). Now also captures NWS `generatedAt` for
-    the post-update lockout gate.
+    `/gridpoints/.../forecast`). Captures NWS `generatedAt` for the
+    post-update lockout gate, falls back to `updateTime`, and tolerates NWS
+    sending both fields in the same payload.
   - `GefsClient` — Open-Meteo's 30-member GFS-0.5° ensemble; `daily_high_stats`
     / `daily_low_stats` aggregate per-(city, date) `(μ, σ)` inside the same
     standard-time window pricing uses.
@@ -64,12 +67,16 @@ test --workspace` and a quick repo skim before reusing.
 - `weather-bot`: end-to-end dry-run loop — scan, refresh NWS + GEFS on
   separate cadences, price (with GEFS σ when available, static fallback),
   gate (price band + lockout), risk-evaluate, JSONL decision log
-  (`logs/decisions/YYYY-MM-DD.jsonl`).
+  (`logs/decisions/YYYY-MM-DD.jsonl`), and one per-pass summary line with
+  scanned/priced/traded/reason counts.
 - `weather-backtest`: reads JSONL decisions, joins to IEM CLI outcomes,
   computes hit rate / Brier / log-loss / mean-bias / 10-bucket calibration
   histogram. Includes a synthetic-decision builder for Phase A
   pre-dry-run model calibration. Ships a `calibrate` binary
-  (`cargo run -p weather-backtest --bin calibrate`).
+  (`cargo run -p weather-backtest --bin calibrate`) and a `replay` binary
+  (`cargo run -p weather-backtest --bin replay -- logs/decisions`) that
+  splits metrics by `sigma_source`, dedupes repeated dry-run trade emissions,
+  and prints an immediate candle spread/fee mark for unique opportunities.
 - `weather-monitor`: still a placeholder; the WebSocket-delta upgrade is
   deferred until polling latency demonstrably matters.
 
@@ -95,10 +102,10 @@ what the bot already says.
   already supports `json_output`, but no consumer reads it yet — confirm fields
   are stable enough to tail into a log aggregator without further parsing
   tweaks.
-- [ ] **Per-pass summary log line:** N markets scanned, N priced, N gated by
+- [x] **Per-pass summary log line:** N markets scanned, N priced, N gated by
   reason (`EdgeBelowMin`, `EvBelowGate`, `SpreadTooWide`, `NoOrderbook`,
-  `PriceOutOfBand`, `ForecastTooFresh`, `UnknownCity`). Currently each market
-  logs individually and the operator has to count.
+  `PriceOutOfBand`, `ForecastTooFresh`, `UnknownCity`). Implemented in
+  `weather-bot::PassSummary`.
 - [x] **CI: `cargo build`, `cargo test --workspace`, `cargo fmt --check`,
   `cargo clippy -- -D warnings`** on PRs to `main`. PR #6 added the workflow
   + a fmt/clippy sweep over the existing tree.
@@ -188,19 +195,28 @@ history. This becomes possible once Phase 1 + Phase 2 land enough data.
   log-loss / mean-bias / 10-bucket calibration. PR #13 added the
   Open-Meteo historical-forecast fetcher + a synthetic-decision builder
   for Phase A pre-dry-run calibration. PR #14 shipped the `calibrate`
-  binary that wires fetchers → decisions → metrics. **Still missing**:
-  multi-horizon replay (the historical-forecast archive is keyed on
-  valid date, not issue time), and P&L vs Kalshi closing prices (needs
-  the `/candles` fetcher below).
-- [ ] **Historical Kalshi prices.** Kalshi exposes `/markets/{ticker}/
-  candles` for OHLC; this is what unblocks the "net-of-fee expectancy >0
-  per trade" Phase A criterion (a) we punted on in PR #13.
+  binary that wires fetchers → decisions → metrics. The `replay` binary now
+  reads `logs/decisions/*.jsonl`, splits outcome metrics by `sigma_source`,
+  dedupes repeated dry-run Trade emissions into unique opportunities, and
+  joins recent Kalshi candles for an immediate spread/fee mark. **Still
+  missing**: multi-horizon replay (the historical-forecast archive is keyed
+  on valid date, not issue time), older `/historical/.../candlesticks`
+  backfill, and fill/lifecycle-aware realised P&L.
+- [x] **Recent Kalshi candles.** `weather-scanner::candles` fetches
+  `/series/{series_ticker}/markets/{ticker}/candlesticks`, parses trade OHLC
+  and top-of-book YES bid/ask OHLC, and powers the replay binary's immediate
+  candle mark. This is a dry-run friction diagnostic, not realised P&L.
+- [ ] **Historical Kalshi candle backfill.** Markets older than Kalshi's
+  recent candle window need `GET /historical/markets/{ticker}/candlesticks`
+  or an equivalent archive path before we can run canonical long-window P&L
+  regressions.
 - [ ] **Walk-forward calibration.** Use a rolling window (e.g. last 60 days)
   to fit σ per (city, horizon) and evaluate on the next 14, sliding forward.
   This is what produces a real `sigma_for_horizon` replacement.
 - [x] **Headline metrics** per replay: hit rate, mean Brier, mean log loss,
-  mean signed bias, 10-bucket calibration histogram. PR #11. P&L
-  comparison waits on historical Kalshi prices.
+  mean signed bias, 10-bucket calibration histogram. PR #11. The replay
+  binary now prints those by `sigma_source` once resolved CLI outcomes are
+  available.
 - [ ] **Regression suite.** Pick a fixed historical window and a fixed config
   and check that future code changes don't tank P&L on the canonical replay.
   Run as a CI job (slow tier).
@@ -422,13 +438,14 @@ Things that are fine today but will matter when the codebase doubles.
 
 ---
 
-## Near-term next tasks (priority-ordered, post-PR-#16)
+## Near-term next tasks (priority-ordered, current main)
 
 The original 7-step priority list (decision-log → CI → CLI fetcher → risk
 caps → executor auth → GEFS fetcher → backtest replay) all merged in PRs
-#5–#16. The bot now runs end-to-end with GEFS σ, risk gates, and JSONL
-logging. The next sequence shifts focus from "build the substrate" to
-"prove edge exists" and "make it safe to actually trade".
+#5–#16. The follow-up replay/NWS parser work added the dry-run replay binary,
+recent candle marks, repeated-emission dedupe, and a tolerant NWS timestamp
+parser. The next sequence shifts focus from "build the substrate" to "prove
+edge exists" and "make it safe to actually trade".
 
 > **Note on the dry-run** *(Perplexity feedback, 2026-05-04)*: 14 days
 > against 5 cities is realistically only 20–80 trade-eligible decisions
@@ -442,21 +459,18 @@ logging. The next sequence shifts focus from "build the substrate" to
 1. **Start the dry-run today** — `cargo run -p weather-bot`, ideally
    under systemd on a VPS so it's not waiting on your laptop. Every day
    of data we don't have is a day of decisions we're making blind.
-2. **Historical Kalshi `/candles` fetcher.** Without historical close
-   prices we can't compute "net-of-fee expectancy >0 per trade" — Phase
-   A criterion (a). Calibration error and Brier are necessary but not
-   sufficient: a model can be calibrated and still lose to fees if the
-   edges it identifies are too small. This is the gating metric, not a
-   nice-to-have. New fetcher in `weather-forecast` or a sibling crate.
-3. **Per-pass summary log line.** Phase 0 open item. N markets scanned,
-   N priced, N gated by reason. Half-day PR; dry-run operations get a
-   lot easier to reason about with this.
-4. **JSONL replay binary, split by `sigma_source` AND with P&L.** Reads
-   `logs/decisions/*.jsonl`, joins to IEM CLI for outcome, joins to
-   `/candles` for close prices, runs `metrics()` independently for
-   `static` vs `gefs_ensemble` rows, prints both calibration histograms
-   side-by-side and a P&L estimate. This is the "did GEFS σ help"
-   answer.
+2. **Replay dry-run logs daily.** Use
+   `cargo run -p weather-backtest --bin replay -- logs/decisions --skip-outcomes`
+   while same-day markets are unresolved. Treat the immediate candle section
+   as a spread/fee friction mark only; it dedupes repeated dry-run emissions
+   and is not realised strategy P&L.
+3. **Replay resolved outcomes by `sigma_source`.** Once CLI reports are
+   available for the resolution dates in the JSONL, rerun replay without
+   `--skip-outcomes`. This is the first direct answer to "did GEFS σ help?"
+   on actual dry-run rows.
+4. **Historical Kalshi candle backfill.** The recent `/candlesticks` fetcher
+   exists, but older windows need Kalshi's historical candle endpoint (or an
+   archive) before we can compute canonical long-window net-of-fee expectancy.
 5. **Reconcile our station table against settled Kalshi markets.** Pull
    the last ~30 days of resolved KXHIGH/KXLOW from Kalshi
    (`/markets?status=settled`), compare each settlement to the IEM CLI

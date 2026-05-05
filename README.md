@@ -79,7 +79,7 @@ Rust workspace with **eleven crates**. The shape mirrors the polymarket-arbitrag
 | **Strategy** | `weather-strategy` | `Signal` generation: edge gate, price band `[$0.20, $0.92]`, NWS-update lockout, fee-aware EV, Kelly sizing. |
 | **Risk** | `weather-risk` | Per-market position cap, per-pass total-exposure cap, concurrent-positions cap. |
 | **Executor** | `weather-executor` | Kalshi RSA-PSS-SHA256 signer + `POST /portfolio/orders` request shape. Hard-coded `never_send=true` short-circuits before HTTP — disabling is an explicit code call. |
-| **Backtest** | `weather-backtest` | JSONL replay + IEM CLI join + headline metrics (hit rate, Brier, log-loss, calibration). Includes the `calibrate` binary for pre-dry-run model calibration. |
+| **Backtest** | `weather-backtest` | JSONL replay + IEM CLI join + headline metrics (hit rate, Brier, log-loss, calibration). Includes `calibrate` for pre-dry-run model calibration and `replay` for dry-run JSONL analysis split by `sigma_source`. |
 | **Bot** | `weather-bot` | Entrypoint + main loop. Owns the JSONL `DecisionLogger` and the NWS / GEFS caches. |
 | **Config** | `weather-config` | Loads `config/default.toml` + env overrides (`__` separator). |
 | **Types** | `weather-types` | Shared domain types + DST-aware standard-time settlement-window helpers. |
@@ -88,7 +88,7 @@ Rust workspace with **eleven crates**. The shape mirrors the polymarket-arbitrag
 
 ## Status
 
-End-to-end runnable in dry-run. **116 unit tests + 3 ignored** live-network integration tests; CI enforces `fmt/clippy -D warnings/build/test --locked` on every PR.
+End-to-end runnable in dry-run. **133 unit tests + 5 ignored** live-network integration tests; CI enforces `fmt/clippy -D warnings/build/test --locked` on every PR.
 
 What's real:
 - **Pricing**: Normal-CDF model with continuity correction + horizon-indexed σ as the *fallback*. Live σ comes from a 30-member GFS ensemble (Open-Meteo) when in-window members are available; output stamps `sigma_source: "gefs_ensemble" | "static"` so the JSONL can split metrics later.
@@ -97,13 +97,14 @@ What's real:
 - **Risk**: per-market position cap, per-pass total-exposure cap, concurrent-positions cap. Wired into the strategy loop.
 - **Decision log**: `logs/decisions/YYYY-MM-DD.jsonl`, one row per market per pass, both Trade and NoTrade. Schema includes `sigma_source` for split-by-source backtests.
 - **Calibration runner**: `cargo run -p weather-backtest --bin calibrate -- --city NY --start 2025-04-01 --end 2025-09-30 --high-strikes 60,65,70,75,80,85,90,95` — pulls archived GFS + IEM CLI, prints headline metrics + 10-bucket calibration histogram.
+- **Replay runner**: `cargo run -p weather-backtest --bin replay -- logs/decisions --skip-outcomes` — reads dry-run JSONL, dedupes repeated Trade emissions into unique opportunities, splits counts/metrics by `sigma_source`, and prints an immediate candle spread/fee mark. Drop `--skip-outcomes` after CLI reports are available to get resolved calibration metrics.
 - **Executor**: Kalshi RSA-PSS-SHA256 auth, `OrderRequest::from_signal`, `POST /portfolio/orders`. **Kill-switched** via a hard-coded `never_send=true` flag — disabling requires an explicit `client.allow_real_sends()` code edit, not a config knob.
 
 What's still pending:
 - The executor isn't yet called from the strategy loop (auth path exists but the bot doesn't hand `Decision::Trade` over to it).
 - Per-market cooldown, per-(city, date) correlated-exposure cap, bankroll-fraction Kelly.
 - WebSocket orderbook deltas (v1 uses REST polling).
-- Historical Kalshi prices for "net-of-fee expectancy >0 per trade" backtest criterion.
+- Historical Kalshi candle backfill and fill/lifecycle-aware realised P&L. The recent candle fetcher exists and replay can print an immediate spread/fee mark, but that is not the same as settled or fill-aware strategy P&L.
 - ECMWF blending, METAR/intraday observations.
 
 See **[ROADMAP.md](ROADMAP.md)** for the live backlog and **[devlog.md](devlog.md)** for the build narrative.
@@ -167,6 +168,24 @@ cargo run -p weather-backtest --bin calibrate -- \
 
 Pulls archived deterministic GFS forecasts (Open-Meteo) and IEM CLI ground truth, walks the strike grid through the same Normal-CDF + continuity-correction the live bot uses, and prints hit rate / Brier / log-loss / mean bias / 10-bucket calibration. `--sigma N.N` overrides the default day-0 σ (1.6°F).
 
+### The replay runner
+
+Dry-run analysis over the JSONL files the bot writes:
+
+```bash
+cargo run -p weather-backtest --bin replay -- logs/decisions --skip-outcomes
+```
+
+Use `--skip-outcomes` while same-day markets are unresolved. The candle section is intentionally labelled as an **immediate spread/fee mark**: it dedupes repeated dry-run Trade emissions and marks unique opportunities to the bid-side liquidation price in the same candle. That mostly measures spread + entry fee friction; it is not realised strategy P&L.
+
+After CLI reports are available for the resolution dates in the log, rerun without `--skip-outcomes`:
+
+```bash
+cargo run -p weather-backtest --bin replay -- logs/decisions
+```
+
+That joins rows to realised CLI outcomes and prints calibration metrics split by `sigma_source`.
+
 ### Reading the dry-run logs
 
 A successful trade decision logs at INFO level with the full EV math:
@@ -211,7 +230,7 @@ The same decision (Trade or NoTrade) is also written as JSON to `logs/decisions/
 │   ├── weather-strategy/   # edge gate, price band, lockout, Kelly
 │   ├── weather-risk/       # position + exposure + concurrent caps
 │   ├── weather-executor/   # Kalshi RSA auth + order placement (kill-switched)
-│   ├── weather-backtest/   # JSONL replay + metrics + calibrate binary
+│   ├── weather-backtest/   # JSONL replay + metrics + calibrate/replay binaries
 │   └── weather-bot/        # entrypoint
 ├── logs/decisions/         # per-day JSONL decision log (gitignored)
 ├── ROADMAP.md

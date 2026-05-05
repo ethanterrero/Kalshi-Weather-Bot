@@ -1,10 +1,11 @@
 # Roadmap
 
-A working roadmap for the Kalshi Weather Bot. Built on top of the merged
-**edge framework** (PR #2 → `main`): probabilistic Normal-CDF pricing,
-horizon-indexed σ, settlement-station validation for the v1 cities (NY, CHI,
-LAX, MIA, AUS), DST-aware standard-time settlement window, Kalshi fee model,
-fee + spread + safety-buffer EV gate, and dry-run decision logging.
+A working roadmap for the Kalshi Weather Bot. Originally built on the
+**edge framework** (PR #2). The May-2026 sweep (PRs #5–#16) closed every
+item on the original "near-term" priority list and most of Phases 0/1/2/3/5
+/6. The bot now runs end-to-end with GEFS ensemble σ, position/exposure
+caps, RSA-PSS-SHA256 order auth (kill-switched), JSONL decision logging,
+and a calibration backtest harness.
 
 This file tracks **what's next**, not what's done. The narrative for shipped
 work lives in [`devlog.md`](devlog.md); the architecture overview lives in
@@ -17,31 +18,60 @@ in parallel with its neighbours where dependencies allow.
 
 ---
 
-## Where we are today (post-PR #2)
+## Where we are today (post-PR #16)
 
-Anchored to current `main` so this section ages well — verify with `cargo test
---workspace` and a quick repo skim before reusing.
+Anchored to current `main` so this section ages well — verify with `cargo
+test --workspace` and a quick repo skim before reusing.
 
-- 10-crate Rust workspace; `cargo build --workspace` and `cargo test
-  --workspace` clean (36 unit tests across types/pricing/strategy/scanner/
-  forecast/config).
+- **11-crate** Rust workspace (`weather-backtest` joined the original ten);
+  `cargo build --workspace` clean; `cargo test --workspace --locked` runs
+  **116 unit tests + 3 ignored** live-network integration tests. CI
+  enforces `fmt --check`, `clippy -D warnings`, `build --locked`,
+  `test --locked` on every PR via [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 - `weather-scanner`: paginating, 429-retrying Kalshi `/markets` client +
   ticker parser pinned to live demo-api responses.
-- `weather-forecast`: NOAA NWS two-step flow (`/points` → `/gridpoints/.../
-  forecast`).
-- `weather-pricing`: Normal-CDF model with horizon-indexed σ (1.6°F at d0 →
-  5.0°F at d7), continuity correction, settlement-station validation against
-  the 5-city table.
+- `weather-forecast`: four sources, all verified live before parsers were
+  written.
+  - `NwsClient` — 7-day deterministic point forecast (`/points` →
+    `/gridpoints/.../forecast`). Now also captures NWS `generatedAt` for
+    the post-update lockout gate.
+  - `GefsClient` — Open-Meteo's 30-member GFS-0.5° ensemble; `daily_high_stats`
+    / `daily_low_stats` aggregate per-(city, date) `(μ, σ)` inside the same
+    standard-time window pricing uses.
+  - `IemCliClient` — Iowa State's parsed JSON view of NWS Daily Climate
+    Reports for realised settlement values.
+  - `HistoricalForecastClient` — Open-Meteo's archived deterministic GFS
+    forecasts, used by the calibrate binary.
+- `weather-pricing`: Normal-CDF model with continuity correction and
+  settlement-station validation. `price_market_with_sigma(threshold,
+  forecast, sigma_override)` accepts a runtime σ; `price_market` is the
+  thin wrapper that falls back to `sigma_for_horizon`. Output stamps
+  `sigma_source` (`"gefs_ensemble"` / `"static"`).
 - `weather-types::tempwindow`: half-open UTC settlement window
   `[date 00:00 LST, date+1 00:00 LST)` per Kalshi's standard-time rule.
-- `weather-strategy`: fee-aware EV gate, both YES- and NO-side evaluation,
-  explicit `NoTrade` reasons, quarter-Kelly contract sizing, fee model from
-  `multiplier * 0.07 * p * (1-p)` rounded up to the cent.
-- `weather-bot`: end-to-end dry-run loop — scan, refresh forecasts on demand,
-  price, gate, log decisions.
-- **Stubs** (still TODO-only): `weather-executor` (Kalshi RSA-PSS-SHA256 +
-  order placement), `weather-risk` (caps, cooldowns), `weather-monitor` (held
-  open as the v2 WebSocket landing pad).
+- `weather-strategy`: fee-aware EV gate, both YES/NO sides, explicit
+  `NoTrade` reasons including `PriceOutOfBand` (the `[$0.20, $0.92]`
+  band that excludes blow-up-risky tail contracts) and `ForecastTooFresh`
+  (the 30-min post-NWS-update lockout). Quarter-Kelly contract sizing.
+- `weather-risk`: real `RiskManager` with per-market position cap, per-pass
+  total-exposure cap, concurrent-positions cap. Wired into the strategy
+  loop; `reset_for_pass` clears between passes.
+- `weather-executor`: real RSA-PSS-SHA256 signer over `(timestamp ‖
+  method ‖ path)`, KALSHI-ACCESS-{KEY,TIMESTAMP,SIGNATURE} headers, and
+  the `POST /portfolio/orders` request shape. Hard-coded `never_send=true`
+  short-circuits before HTTP. Disabling is an explicit
+  `client.allow_real_sends()` code call — not a config knob, by design.
+- `weather-bot`: end-to-end dry-run loop — scan, refresh NWS + GEFS on
+  separate cadences, price (with GEFS σ when available, static fallback),
+  gate (price band + lockout), risk-evaluate, JSONL decision log
+  (`logs/decisions/YYYY-MM-DD.jsonl`).
+- `weather-backtest`: reads JSONL decisions, joins to IEM CLI outcomes,
+  computes hit rate / Brier / log-loss / mean-bias / 10-bucket calibration
+  histogram. Includes a synthetic-decision builder for Phase A
+  pre-dry-run model calibration. Ships a `calibrate` binary
+  (`cargo run -p weather-backtest --bin calibrate`).
+- `weather-monitor`: still a placeholder; the WebSocket-delta upgrade is
+  deferred until polling latency demonstrably matters.
 
 Anything that contradicts the above means the README/devlog/code drifted —
 trust the code first and update this file.
@@ -54,11 +84,9 @@ The bot already runs, but we have no way to tell whether the model is *good*.
 Before we add forecast sources or build out execution, get a clean signal on
 what the bot already says.
 
-- [ ] **Persist every dry-run decision** to a JSONL or SQLite file
-  (`logs/decisions/YYYY-MM-DD.jsonl` is the obvious shape). One row per market
-  per pass: ticker, timestamp, yes_bid/ask, model_p, σ, horizon, fee, raw
-  edge, net EV, decision, reason. Without this we can't compare model-implied
-  probabilities to settled outcomes a week later.
+- [x] **Persist every dry-run decision** to a JSONL file
+  (`logs/decisions/YYYY-MM-DD.jsonl`). PR #5; schema extended in PRs
+  #11 (threshold fields) and #16 (`sigma_source`).
 - [ ] **Add a `--once` / single-pass CLI flag** to `weather-bot` so we can run
   the pipeline as a script in CI / cron without holding the process open.
   Today the bot only runs as a long-lived loop, which is awkward for offline
@@ -69,11 +97,11 @@ what the bot already says.
   tweaks.
 - [ ] **Per-pass summary log line:** N markets scanned, N priced, N gated by
   reason (`EdgeBelowMin`, `EvBelowGate`, `SpreadTooWide`, `NoOrderbook`,
-  `UnknownCity`). Currently each market logs individually and the operator has
-  to count.
-- [ ] **CI: `cargo build`, `cargo test --workspace`, `cargo fmt --check`,
-  `cargo clippy -- -D warnings`** on PRs to `main`. The repo has no CI yet;
-  this is cheap and prevents the next regression.
+  `PriceOutOfBand`, `ForecastTooFresh`, `UnknownCity`). Currently each market
+  logs individually and the operator has to count.
+- [x] **CI: `cargo build`, `cargo test --workspace`, `cargo fmt --check`,
+  `cargo clippy -- -D warnings`** on PRs to `main`. PR #6 added the workflow
+  + a fmt/clippy sweep over the existing tree.
 - [ ] **Smoke test in CI** that boots the bot with a stub Kalshi server (or
   recorded fixtures) and asserts the strategy loop runs at least one pass
   without panicking. Catches integration breakage that unit tests miss.
@@ -89,16 +117,15 @@ The model compares NWS forecasts to a Kalshi-settled value. If those two
 sources ever diverge — different station, different rounding, different
 standard-time interpretation — every "edge" the bot sees is noise.
 
-- [ ] **Pull historical CLI reports** for the 5 v1 stations (KNYC, KORD,
-  KLAX, KMIA, KAUS). Iowa State IEM (`mesonet.agron.iastate.edu/wx/afos`)
-  hosts CLI text products; ASOS one-minute / hourly observations are also
-  on IEM. Need a small fetcher in `weather-forecast` (or a sibling crate) that
-  parses CLI to a `(date, station, high_f, low_f)` record.
+- [x] **Pull historical CLI reports** for the 5 v1 stations (KNYC, KMDW,
+  KLAX, KMIA, KAUS) via Iowa State's parsed JSON view. Lives in
+  `weather-forecast::cli`; PR #7. Note Chicago = KMDW (Midway), not KORD —
+  fixed before the original sweep landed.
 - [ ] **Reconcile CLI vs Kalshi settlement** for past markets: pull the last
   ~30 days of resolved KXHIGH/KXLOW markets from Kalshi
   (`/markets?status=settled` or `/events`), compare each settlement value to
   our parsed CLI high/low. Any drift > 0 is a bug in our station table or
-  parser.
+  parser. (Substrate exists; the actual fetch + diff tool doesn't.)
 - [ ] **Surface a `settlement_value` field on `KalshiMarket`** when it's
   resolved, so backtests can join model probability → realized outcome
   without re-fetching.
@@ -118,21 +145,25 @@ standard-time interpretation — every "edge" the bot sees is noise.
 The model is currently fed by NWS only. Replacing fixed σ with a real
 ensemble dispersion is where most of the model's edge will come from.
 
-- [ ] **NOAA GEFS ensemble.** ~30 perturbed members, 0.25° / 0.5° grids,
-  3-hourly out to 16 days. Available on AWS Open Data
-  (`noaa-gefs-pds`). Job: fetch the latest run's 2 m temperature for each
-  city's grid cell, derive `(μ, σ)` per (city, day). This *replaces* the
-  current `sigma_for_horizon` table for in-horizon days.
-- [ ] **ECMWF / Open-Meteo ECMWF.** Open-Meteo's free API exposes a
-  blended-model and an ECMWF-only forecast. Useful as a second model to
-  blend with NWS / GEFS. Lower priority than GEFS for ensemble σ but cheaper
-  to integrate.
+- [x] **NOAA GEFS ensemble (Open-Meteo path).** PR #10 added the fetcher
+  + per-(city, date) `daily_high_stats` / `daily_low_stats`. PR #15 wired
+  it into pricing — `price_market_with_sigma` now uses ensemble σ when
+  available, falls back to the static table otherwise. PR #16 stamps
+  `sigma_source` on every JSONL row so the backtest can split metrics.
+  AWS `noaa-gefs-pds` (rigorous, GRIB2-parsing) path is still open — only
+  needed if Open-Meteo rate-limits or we want non-temperature variables.
+- [ ] **ECMWF / Open-Meteo ECMWF.** Open-Meteo's ensemble endpoint
+  supports `models=ecmwf_ifs025` — second source for the same pricing
+  path, blended with GEFS. Fetcher pattern is identical to `GefsClient`;
+  blender is one weighted-σ helper.
 - [ ] **METAR / ASOS observations** for *intra-day* nowcast updates. On
   settlement day, by the time it's 2pm local the bot can read the running
   high directly from observations and update P(YES) materially. This is the
-  biggest potential edge for thin late-day markets.
-- [ ] **Forecast cache abstraction.** Today `weather-bot::ForecastCache` is a
-  `HashMap<city_code, (Forecast, ts)>`. As we add sources we want
+  biggest potential edge for thin late-day markets. NWS exposes
+  `/stations/{ICAO}/observations` directly; no new auth, no new dep.
+- [ ] **Forecast cache abstraction.** Today `weather-bot::ForecastCache`
+  and `EnsembleCache` are two parallel `HashMap<city_code, ...>` stores.
+  As we add ECMWF / METAR we want
   `HashMap<(source, city_code), ...>` with a single `blended_forecast(city,
   day)` accessor in `weather-pricing` so the pricing layer doesn't grow source
   switches.
@@ -152,19 +183,24 @@ ensemble dispersion is where most of the model's edge will come from.
 We can't trust σ calibration or strategy thresholds without a way to replay
 history. This becomes possible once Phase 1 + Phase 2 land enough data.
 
-- [ ] **Replay loop.** Given a date `D`, a set of `(forecast snapshot at D-h)
-  for h in 0..7`, and the realized CLI outcome on `D`, compute what the bot
-  *would have decided* at each horizon and what the P&L would have been at
-  each Kalshi closing price.
+- [~] **Replay loop.** PR #11 added the `weather-backtest` crate: read
+  JSONL decisions, join to CLI outcomes, compute hit rate / Brier /
+  log-loss / mean-bias / 10-bucket calibration. PR #13 added the
+  Open-Meteo historical-forecast fetcher + a synthetic-decision builder
+  for Phase A pre-dry-run calibration. PR #14 shipped the `calibrate`
+  binary that wires fetchers → decisions → metrics. **Still missing**:
+  multi-horizon replay (the historical-forecast archive is keyed on
+  valid date, not issue time), and P&L vs Kalshi closing prices (needs
+  the `/candles` fetcher below).
 - [ ] **Historical Kalshi prices.** Kalshi exposes `/markets/{ticker}/
-  candles` for OHLC; check whether it's enough or whether we need to record a
-  rolling orderbook snapshot ourselves going forward.
+  candles` for OHLC; this is what unblocks the "net-of-fee expectancy >0
+  per trade" Phase A criterion (a) we punted on in PR #13.
 - [ ] **Walk-forward calibration.** Use a rolling window (e.g. last 60 days)
   to fit σ per (city, horizon) and evaluate on the next 14, sliding forward.
   This is what produces a real `sigma_for_horizon` replacement.
-- [ ] **Headline metrics** per replay: hit rate, avg fee paid, avg net EV vs
-  realized P&L, Brier score / log-loss for the model probability vs the
-  outcome, calibration plot (predicted P bucketed vs realized hit rate).
+- [x] **Headline metrics** per replay: hit rate, mean Brier, mean log loss,
+  mean signed bias, 10-bucket calibration histogram. PR #11. P&L
+  comparison waits on historical Kalshi prices.
 - [ ] **Regression suite.** Pick a fixed historical window and a fixed config
   and check that future code changes don't tank P&L on the canonical replay.
   Run as a CI job (slow tier).
@@ -201,20 +237,27 @@ infrastructure existing.
 
 ## Phase 5 — Market microstructure & execution
 
-`weather-executor` is a stub today. Live trading needs auth + order placement,
-plus enough microstructure awareness that the bot doesn't get adversely
+`weather-executor` now has the auth path and request shape, kill-switched
+behind a hard-coded `never_send=true`. Live trading still needs lifecycle
+tracking + microstructure awareness so the bot doesn't get adversely
 selected on every fill.
 
-- [ ] **Kalshi RSA-PSS-SHA256 auth.** Load PEM at startup, sign
-  `timestamp + method + path`, send `KALSHI-ACCESS-{KEY,TIMESTAMP,SIGNATURE}`
-  headers. Demo env first. The crate doc-comment in
-  `crates/weather-executor/src/lib.rs` already lists the spec.
-- [ ] **`POST /portfolio/orders` + dry-run/live opt-in.** Mirror the
-  polymarket bot's pattern: even with `mode = "live"` and creds set, log the
-  payload before sending until manually flipped on.
-- [ ] **Post-only / limit at the resting opposite-side price.** We already
-  log `limit_price = opposite ask` in the dry-run line; make sure live orders
-  use the same and don't accidentally cross.
+- [x] **Kalshi RSA-PSS-SHA256 auth.** PR #9 added `KalshiSigner` (PKCS#8
+  + PKCS#1 PEM loaders), `signing_string(ts, method, path)`, base64
+  signature, and the three KALSHI-ACCESS-* headers via
+  `AccessHeaders::apply(builder)`.
+- [x] **`POST /portfolio/orders` + dry-run/live opt-in.** PR #9 added
+  `OrderRequest::from_signal`, `KalshiOrderClient::place_order`, and the
+  hard-coded `never_send=true` short-circuit. Disabling is an explicit
+  `client.allow_real_sends()` code call — not a config knob, by design.
+- [x] **Post-only / limit at the resting opposite-side price.**
+  `OrderRequest::from_signal` always sets `post_only = true` and uses the
+  signal's `limit_price` (which the strategy populates with the opposite-
+  side ask).
+- [ ] **Wire the executor into the strategy loop.** Today the bot has the
+  executor crate available but `run_strategy_pass` doesn't actually call
+  `place_order`. Needs the same `Decision::Trade` → executor handoff the
+  risk layer already has.
 - [ ] **Order lifecycle tracking.** Track open orders via
   `/portfolio/orders` and reconcile with our local "intended" state every
   pass. Cancel-and-reprice if our model probability moves > X bps or the book
@@ -235,23 +278,21 @@ selected on every fill.
 
 ## Phase 6 — Risk management
 
-`weather-risk` is also a stub. Strategy emits a contract count today; nothing
-checks it against caps.
+`weather-risk` is real. The strategy loop now runs every Trade signal
+through `RiskManager::evaluate` before the executor would see it.
 
-- [ ] **Position size cap.** Enforce `max_position_size_usd` per market;
-  shrink contract count to fit. Already configured in
-  `config/default.toml`, just unused.
-- [ ] **Total exposure cap.** Sum of `(contracts * limit_price)` across open
-  positions ≤ `max_total_exposure_usd`. Reject new signals that would breach
-  it.
+- [x] **Position size cap.** Per-market `max_position_size_usd` clips
+  contract count. PR #8.
+- [x] **Total exposure cap.** Per-pass running sum vs
+  `max_total_exposure_usd`; further clip or reject. PR #8.
+- [x] **Concurrent positions cap.** Hard cap on signal count per pass via
+  `max_concurrent_positions`. PR #8.
 - [ ] **Per-market cooldown.** After a fill (or a cancel), don't re-emit a
   signal for the same market for `per_market_cooldown_secs`. Prevents the bot
-  thrashing on tiny price wiggles.
+  thrashing on tiny price wiggles. Config exists; cooldown logic doesn't.
 - [ ] **Per-city / per-day exposure cap.** Five YES bets on a hot day in NYC
   are not five independent trades — they're correlated. Add a cap on
   `(city, date)` aggregate notional.
-- [ ] **Concurrent positions cap** (`max_concurrent_positions`). Already
-  configured, needs wiring.
 - [ ] **Bankroll-fraction sizing.** Today Kelly is computed against an
   implicit bankroll of $1; the contract count comes out of the strategy as
   a hint and is then bounded by `max_position_size_usd`. Refactor so Kelly
@@ -260,10 +301,22 @@ checks it against caps.
   ceiling.
 - [ ] **Kill switch.** A file flag (`./KILL` exists) or env var
   (`WEATHER_BOT_KILL=1`) that the bot reads each pass and, if set, cancels
-  all open orders and refuses to place new ones.
+  all open orders and refuses to place new ones. (The executor's
+  `never_send` is the *static* kill-switch; this would be the *dynamic*
+  one the operator can toggle without redeploying.)
 - [ ] **Paper / live mode separation surfaced everywhere.** Logs, metrics,
   decision JSONL — every line should carry `mode = dry_run | paper | live`
   so backtests and live runs don't get mixed.
+
+> Risk-adjacent gates that aren't strictly the risk layer's job, but
+> landed alongside it:
+>
+> - **Price band gate** (`[$0.20, $0.92]`): excludes tail-bracket
+>   contracts where one losing trade wipes out months of small wins.
+>   Lives in `weather-strategy::decide`. PR #12.
+> - **NWS-update lockout (30 min)**: sit out the first 30 min after each
+>   NWS forecast issue (`generatedAt`) so arbitrage bots don't pick us
+>   off. PR #12.
 
 ---
 
@@ -325,6 +378,24 @@ first.
 - [?] **Bid/ask spread tightening.** As volume grows in Kalshi weather, the
   cheap `max_spread = 0.10` cutoff might be leaving easy edge on the table.
   Re-evaluate after backtests.
+- [?] **Module C — forecast-revision momentum.** The current pricing path
+  is essentially Module A (ensemble divergence: model `P(YES)` vs market
+  price). Phase 2's METAR item is Module B (intraday observation lock).
+  Module C is a third, structurally uncorrelated signal: when the GEFS
+  06z run shifts ensemble mean by >X°F vs the 00z run *and* the market
+  hasn't moved, lean toward the new run. Cheap once GEFS fetching
+  exists — needs run-time-indexed caching (we currently keep only the
+  latest run per city). Worth scaffolding once the dry-run + backtest
+  prove Module A has measurable edge; doing it before is premature.
+- [?] **Python sidecar for Phase 4 fitting.** Closed-form Normal-CDF is
+  fine in Rust; non-Gaussian tail fits, Bayesian σ updates, and
+  gradient-boosted bracket probabilities are not — every Python ML
+  library exists for a reason. Decision to make *now*: when Phase 4
+  starts, fit parameters in a Python sidecar (read JSONL + CLI, write
+  fitted-σ table as JSON), and have the Rust pricing crate consume
+  that table. Don't hand-roll fitting code in Rust just because the
+  rest of the bot is in Rust. Keep the hot path Rust, the fitting cold
+  path Python.
 
 ---
 
@@ -338,41 +409,94 @@ Things that are fine today but will matter when the codebase doubles.
 - [ ] **`weather-monitor` either becomes the WebSocket layer (Phase 5) or
   gets deleted.** The empty crate is technical debt either way; the README
   notes it as v2's landing pad.
-- [ ] **Clippy clean.** Currently no clippy enforcement. Adopt
-  `clippy::pedantic` selectively + `-D warnings` as part of CI.
+- [x] **Clippy clean.** PR #6 fixed the existing drift (boxed
+  `EvBreakdown` in `Decision::Trade` to fix `large_enum_variant`,
+  simplified two scanner patterns) and CI now enforces
+  `clippy --workspace --all-targets -- -D warnings` on every PR.
 - [ ] **`Decimal` everywhere there's money.** The codebase is mostly already
   there, but spot-check that no `f64` is silently doing price math —
-  especially in any new ensemble code in Phase 2.
+  especially in the GEFS σ path (where σ itself is naturally `f64`).
 - [ ] **Doc-tests on the pricing math.** A doctest on `price_market` that
   checks "μ = T → P ≈ 0.5" is exactly the kind of regression we want when
   someone "improves" the model later.
 
 ---
 
-## Near-term next tasks (priority-ordered)
+## Near-term next tasks (priority-ordered, post-PR-#16)
 
-If a contributor (human or agent) picks the next thing off this roadmap, do
-them in this order:
+The original 7-step priority list (decision-log → CI → CLI fetcher → risk
+caps → executor auth → GEFS fetcher → backtest replay) all merged in PRs
+#5–#16. The bot now runs end-to-end with GEFS σ, risk gates, and JSONL
+logging. The next sequence shifts focus from "build the substrate" to
+"prove edge exists" and "make it safe to actually trade".
 
-1. **Phase 0 → decision-log JSONL.** Cheapest, unlocks everything.
-2. **Phase 0 → CI (build/test/fmt/clippy).** A single GitHub Actions
-   workflow. Stops regressions before they're reviewed.
-3. **Phase 1 → CLI report fetcher + reconciliation against the last 30 days
-   of settled markets.** Validates the v1 station table, and produces the
-   first "real" data the backtest will need.
-4. **Phase 6 → minimal risk manager (position cap + total exposure).** Wire
-   in the values that already sit in `config/default.toml`. Cheap, makes the
-   bot safe to be left running unattended in dry-run for longer.
-5. **Phase 5 → Kalshi RSA auth + `POST /portfolio/orders` against demo.**
-   Behind a hard-coded "do not actually send" flag at first. Gets the auth
-   path debugged before any of the risk / execution loop matters.
-6. **Phase 2 → GEFS ensemble fetcher.** First real upgrade to the model.
-   Replaces the hand-calibrated σ on in-horizon days.
-7. **Phase 3 → backtest replay using the JSONL log + GEFS history + CLI
-   data.** First quantitative check that the model edge is real.
+> **Note on the dry-run** *(Perplexity feedback, 2026-05-04)*: 14 days
+> against 5 cities is realistically only 20–80 trade-eligible decisions
+> after the gates fire — far too few to fill the calibration histogram
+> with statistical power. Treat the dry-run as a **smoke test** (does
+> the bot run? do gates fire? are sources healthy?). The actual
+> **calibration evidence** comes from running the synthetic-decision
+> backtest harness over months of historical data via the `calibrate`
+> binary. Both. Don't conflate them.
 
-After step 7 we'll know whether the bot has a measurable edge. Phases 4 and 5
-(beyond auth) only make sense if the answer is yes.
+1. **Start the dry-run today** — `cargo run -p weather-bot`, ideally
+   under systemd on a VPS so it's not waiting on your laptop. Every day
+   of data we don't have is a day of decisions we're making blind.
+2. **Historical Kalshi `/candles` fetcher.** Without historical close
+   prices we can't compute "net-of-fee expectancy >0 per trade" — Phase
+   A criterion (a). Calibration error and Brier are necessary but not
+   sufficient: a model can be calibrated and still lose to fees if the
+   edges it identifies are too small. This is the gating metric, not a
+   nice-to-have. New fetcher in `weather-forecast` or a sibling crate.
+3. **Per-pass summary log line.** Phase 0 open item. N markets scanned,
+   N priced, N gated by reason. Half-day PR; dry-run operations get a
+   lot easier to reason about with this.
+4. **JSONL replay binary, split by `sigma_source` AND with P&L.** Reads
+   `logs/decisions/*.jsonl`, joins to IEM CLI for outcome, joins to
+   `/candles` for close prices, runs `metrics()` independently for
+   `static` vs `gefs_ensemble` rows, prints both calibration histograms
+   side-by-side and a P&L estimate. This is the "did GEFS σ help"
+   answer.
+5. **Reconcile our station table against settled Kalshi markets.** Pull
+   the last ~30 days of resolved KXHIGH/KXLOW from Kalshi
+   (`/markets?status=settled`), compare each settlement to the IEM CLI
+   high/low. Drift > 0 is a station-table bug. Phase 1's open item.
+6. **Dynamic kill switch.** *Required before any live trading.* The
+   static `never_send=true` in the executor is a development guard —
+   it requires a code edit to disable. The *dynamic* kill switch is for
+   the operator to halt the bot in 5 seconds without redeploying:
+   - file flag `./KILL` checked at the top of every pass
+   - `SIGTERM` handler that cancels open orders
+   - env var `WEATHER_BOT_KILL=1`
+   - cumulative-drawdown soft kill: bot itself refuses new orders if
+     down >X% of bankroll in 24h. (Static kill is for you protecting
+     the bot; soft kill is for the bot protecting you from yourself.)
+   All four, because they fail in different ways.
+7. **Paper-trade mode.** *Required before any live trading.* Add a third
+   mode between dry-run and live: same code path as live, but hits a
+   Kalshi paper endpoint or a local mock that simulates fills against
+   the real orderbook. Reveals lifecycle bugs (cancel-and-reprice,
+   queue position, stale quote, partial fills, rejections, timeouts)
+   that dry-run can't because dry-run never actually places anything.
+8. **Wire the executor into the strategy loop.** Now (after items 6-7
+   land) the bot can actually trade. `Decision::Trade` →
+   `OrderRequest::from_signal` → `KalshiOrderClient::place_order`,
+   gated by `cfg.execution.mode` and `never_send`.
+9. **Per-market cooldown + bankroll-fraction Kelly.** Phase 6's open
+   items. Both small. Lets the bot run unattended without thrashing.
+10. **METAR / station observations.** Phase 2's "biggest potential
+    edge" item — same-day intraday "lock" trades. Real engineering
+    (new fetcher, new strategy mode), but per Perplexity's research,
+    this is where retail edge actually lives.
+11. **ECMWF blending.** Second source for the same pricing path. Cheap
+    once GEFS is wired (same Open-Meteo client, just a different
+    `models=` param).
+
+Items 1–4 unblock the empirical question. Items 6–7 are the safety
+infrastructure that has to land *before* `never_send=false`. Item 8
+turns the bot from a "decision logger" into a "trader" — only do it
+after 6–7 give us a way to halt cleanly and a way to find lifecycle
+bugs without spending money.
 
 ---
 

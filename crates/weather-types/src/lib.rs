@@ -142,3 +142,47 @@ pub struct Position {
     pub cost_basis: Decimal,
     pub opened_at: DateTime<Utc>,
 }
+
+/// Best bid/ask for a Kalshi market, in dollars per contract.
+///
+/// Kalshi orderbooks are binary: there's a YES book and a NO book, but by
+/// no-arbitrage `NO ask = 1 - YES bid` and `NO bid = 1 - YES ask`. We
+/// only carry the YES side and derive the NO side on demand. Centralised
+/// here (rather than in `weather-strategy`) so the scanner, executor,
+/// and stale-quote checks can share the same shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrderbookQuote {
+    pub yes_bid: Option<Decimal>,
+    pub yes_ask: Option<Decimal>,
+}
+
+impl OrderbookQuote {
+    /// Pull the resting top-of-book directly from a `KalshiMarket`. The
+    /// scanner populates these fields from `/markets`.
+    pub fn from_market(m: &KalshiMarket) -> Self {
+        Self {
+            yes_bid: m.yes_bid,
+            yes_ask: m.yes_ask,
+        }
+    }
+
+    /// YES ask is the price you pay to buy YES.
+    pub fn yes_ask(&self) -> Option<Decimal> {
+        self.yes_ask
+    }
+
+    /// NO ask = 1 − YES bid. Selling YES at the bid is equivalent to
+    /// buying NO at this implied price; Kalshi's orderbook docs make this
+    /// explicit.
+    pub fn no_ask(&self) -> Option<Decimal> {
+        self.yes_bid.map(|b| Decimal::ONE - b)
+    }
+
+    /// YES bid-ask spread, when both sides are quoted.
+    pub fn yes_spread(&self) -> Option<Decimal> {
+        match (self.yes_ask, self.yes_bid) {
+            (Some(a), Some(b)) => Some(a - b),
+            _ => None,
+        }
+    }
+}

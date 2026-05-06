@@ -94,10 +94,9 @@ what the bot already says.
 - [x] **Persist every dry-run decision** to a JSONL file
   (`logs/decisions/YYYY-MM-DD.jsonl`). PR #5; schema extended in PRs
   #11 (threshold fields) and #16 (`sigma_source`).
-- [ ] **Add a `--once` / single-pass CLI flag** to `weather-bot` so we can run
+- [x] **Add a `--once` / single-pass CLI flag** to `weather-bot` so we can run
   the pipeline as a script in CI / cron without holding the process open.
-  Today the bot only runs as a long-lived loop, which is awkward for offline
-  evaluation.
+  Implemented in the May 2026 safety-stack sweep.
 - [ ] **Structured JSON logging path validated end-to-end.** `LoggingConfig`
   already supports `json_output`, but no consumer reads it yet — confirm fields
   are stable enough to tail into a log aggregator without further parsing
@@ -174,9 +173,12 @@ ensemble dispersion is where most of the model's edge will come from.
   `HashMap<(source, city_code), ...>` with a single `blended_forecast(city,
   day)` accessor in `weather-pricing` so the pricing layer doesn't grow source
   switches.
-- [ ] **Source health checks.** If a source's last successful refresh is
-  older than 2× its expected interval, log a `SourceStale` warning and *skip*
-  it rather than feeding stale data to the blend.
+- [x] **Source health checks.** If a source's last successful refresh is
+  older than 2× its expected interval, log a `source_stale` warning and *skip*
+  it rather than feeding stale data to the blend. Implemented in
+  `weather-bot::source_health::classify`. NWS staleness skips the market and
+  bumps `nws_source_stale`; GEFS staleness falls back to the static σ table
+  and bumps `gefs_source_stale`. Counters surface in the per-pass summary.
 
 > Each source lands as a separate fetcher behind a `ForecastSource` trait
 > (`fn fetch(city) -> impl Future<Output = Result<Forecast>>`). Don't add a
@@ -303,26 +305,31 @@ through `RiskManager::evaluate` before the executor would see it.
   `max_total_exposure_usd`; further clip or reject. PR #8.
 - [x] **Concurrent positions cap.** Hard cap on signal count per pass via
   `max_concurrent_positions`. PR #8.
-- [ ] **Per-market cooldown.** After a fill (or a cancel), don't re-emit a
-  signal for the same market for `per_market_cooldown_secs`. Prevents the bot
-  thrashing on tiny price wiggles. Config exists; cooldown logic doesn't.
+- [x] **Per-market cooldown.** After emitting a signal, don't re-emit on the
+  same market for `per_market_cooldown_secs`. Tracks `last_signal_at` per
+  ticker in `RiskManager`; spans passes (`reset_for_pass` does *not* clear
+  it). Cooldown rejects don't burn a `max_concurrent_positions` slot.
+  `RejectReason::InCooldown` surfaces in the per-pass summary as
+  `risk_in_cooldown`.
 - [ ] **Per-city / per-day exposure cap.** Five YES bets on a hot day in NYC
   are not five independent trades — they're correlated. Add a cap on
   `(city, date)` aggregate notional.
-- [ ] **Bankroll-fraction sizing.** Today Kelly is computed against an
-  implicit bankroll of $1; the contract count comes out of the strategy as
-  a hint and is then bounded by `max_position_size_usd`. Refactor so Kelly
-  and the cap interact correctly: Kelly determines a *fraction* of the
-  configured bankroll, then the cap clamps that to the per-market dollar
-  ceiling.
-- [ ] **Kill switch.** A file flag (`./KILL` exists) or env var
-  (`WEATHER_BOT_KILL=1`) that the bot reads each pass and, if set, cancels
-  all open orders and refuses to place new ones. (The executor's
-  `never_send` is the *static* kill-switch; this would be the *dynamic*
-  one the operator can toggle without redeploying.)
-- [ ] **Paper / live mode separation surfaced everywhere.** Logs, metrics,
-  decision JSONL — every line should carry `mode = dry_run | paper | live`
-  so backtests and live runs don't get mixed.
+- [x] **Bankroll-fraction sizing.** `weather-strategy::decide` now takes a
+  `bankroll_usd: Decimal` arg sourced from `risk.bankroll_usd`. Kelly is
+  computed properly: `f* = raw_edge / (1 − price)`, then
+  `contracts = floor(bankroll · kelly_fraction · f* / price)`. The risk
+  manager still clamps that to the per-market and per-pass dollar caps.
+- [x] **Kill switch.** Dynamic operator halt — separate from the executor's
+  static `never_send=true`. Implemented in `weather-bot::kill_switch::evaluate`
+  with three gates checked at the top of every strategy pass: file flag
+  (`./KILL`), env var (`WEATHER_BOT_KILL`), and a 24h-realised-loss soft kill
+  (config-disabled by default; activates when there's a real fill ledger).
+  SIGTERM is also handled in the bot's main loop alongside SIGINT.
+- [x] **Paper / live mode separation surfaced everywhere.** `ExecutionMode`
+  now has three variants (`DryRun`, `Paper`, `Live`); `as_str()` /
+  `Display` give `dry_run` / `paper` / `live`. The JSONL `DecisionRecord`
+  carries `mode`, the bot's startup line stamps it, and replay/backtest
+  splits should split on it.
 
 > Risk-adjacent gates that aren't strictly the risk layer's job, but
 > landed alongside it:
@@ -419,9 +426,8 @@ first.
 
 Things that are fine today but will matter when the codebase doubles.
 
-- [ ] **Unify orderbook quote types.** `OrderbookQuote::from_market` lives in
-  `weather-strategy`; the same data flows through `weather-scanner`. One
-  shared type in `weather-types` would be cleaner.
+- [x] **Unify orderbook quote types.** `OrderbookQuote` now lives in
+  `weather-types`; `weather-strategy` re-uses it. Same shape, single home.
 - [ ] **`weather-monitor` either becomes the WebSocket layer (Phase 5) or
   gets deleted.** The empty crate is technical debt either way; the README
   notes it as v2's landing pad.
@@ -429,12 +435,14 @@ Things that are fine today but will matter when the codebase doubles.
   `EvBreakdown` in `Decision::Trade` to fix `large_enum_variant`,
   simplified two scanner patterns) and CI now enforces
   `clippy --workspace --all-targets -- -D warnings` on every PR.
-- [ ] **`Decimal` everywhere there's money.** The codebase is mostly already
-  there, but spot-check that no `f64` is silently doing price math —
-  especially in the GEFS σ path (where σ itself is naturally `f64`).
-- [ ] **Doc-tests on the pricing math.** A doctest on `price_market` that
-  checks "μ = T → P ≈ 0.5" is exactly the kind of regression we want when
-  someone "improves" the model later.
+- [x] **`Decimal` everywhere there's money.** Audited; findings in
+  `docs/research/f64-money-audit.md`. Money paths are already `Decimal`
+  end-to-end. The single `f64 → Decimal` boundary is
+  `Decimal::from_f64(yes_p)` in `weather-pricing`, where `yes_p` is the
+  bounded-by-the-Normal-CDF probability.
+- [x] **Doc-tests on the pricing math.** Three doctests on `price_market`,
+  `normal_cdf`, and `sigma_for_horizon` — they pin "μ = T → P ≈ 0.5",
+  Φ(0)=0.5, and σ(1) < σ(7) ≤ 6.0.
 
 ---
 

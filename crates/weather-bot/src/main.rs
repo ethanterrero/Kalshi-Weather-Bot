@@ -1,7 +1,10 @@
 mod decision_log;
+mod kill_switch;
+mod source_health;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use clap::Parser;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,12 +16,39 @@ use weather_forecast::{
     daily_high_stats, daily_low_stats, EnsembleForecast, GefsClient, NwsClient,
 };
 use weather_pricing::{price_market_with_sigma, PricingError};
-use weather_risk::{RiskDecision, RiskManager};
+use weather_risk::{RejectReason, RiskDecision, RiskManager};
 use weather_scanner::MarketScanner;
 use weather_strategy::{decide, Decision, FeeModel, NoTradeReason};
 use weather_types::{lookup_city, CitySpec, Forecast, TempStat};
 
 use decision_log::{record_from, DecisionLogger};
+use kill_switch::{evaluate as evaluate_kill_switch, KillState};
+use source_health::{classify as classify_source_freshness, SourceFreshness};
+
+/// Multiplier of the configured refresh interval after which a source is
+/// considered "stale" (broken) rather than just "needs refresh." 2 means
+/// "we missed two refreshes in a row" — that's a real outage signal, not
+/// a one-tick blip. Conservative; the loop does refresh-on-demand so the
+/// healthy path never reaches 2× regardless.
+const SOURCE_STALENESS_MULTIPLIER: u32 = 2;
+
+/// Command-line flags accepted by the bot binary. Anything not on the CLI
+/// comes from `config/default.toml` + env var overrides.
+#[derive(Parser, Debug)]
+#[command(
+    name = "weather-bot",
+    about = "Kalshi Weather Bot — strategy + decision logger",
+    long_about = None,
+)]
+struct Cli {
+    /// Run a single strategy pass and exit. Useful for cron / CI smoke
+    /// tests instead of the long-lived loop. The market-list refresh and
+    /// strategy pass run sequentially in this mode rather than as
+    /// independent tasks, so the binary returns 0 only after both have
+    /// completed.
+    #[arg(long)]
+    once: bool,
+}
 
 /// Cached forecast keyed on Kalshi city code (e.g. "NY"). Refreshed on its
 /// own cadence; the strategy loop reads from this cache rather than calling
@@ -34,6 +64,7 @@ type EnsembleCache = Arc<RwLock<HashMap<String, (EnsembleForecast, DateTime<Utc>
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
     let config = AppConfig::load()?;
     init_tracing(&config.logging);
 
@@ -41,13 +72,22 @@ async fn main() -> Result<()> {
         kalshi_env = %config.kalshi.env,
         kalshi_base = %config.kalshi.base_url(),
         nws_base = %config.forecast.nws_base_url,
-        execution = ?config.execution.mode,
+        execution = %config.execution.mode,
         series_count = config.scanner.series_tickers.len(),
+        once = cli.once,
         "Kalshi Weather Bot starting"
     );
 
-    if matches!(config.execution.mode, ExecutionMode::Live) {
-        warn!("execution.mode = live; live order placement is NOT implemented yet — staying in dry-run");
+    match config.execution.mode {
+        ExecutionMode::Live => warn!(
+            "execution.mode = live; live order placement is NOT implemented yet — \
+             staying in dry-run for this run"
+        ),
+        ExecutionMode::Paper => warn!(
+            "execution.mode = paper; paper-trade adapter is NOT implemented yet — \
+             staying in dry-run for this run"
+        ),
+        ExecutionMode::DryRun => {}
     }
 
     let scanner = Arc::new(MarketScanner::new(&config));
@@ -78,10 +118,50 @@ async fn main() -> Result<()> {
         info!("decision log disabled (logging.decision_log_dir = null/empty)");
     }
 
+    info!(
+        kill_switch_enabled = config.kill_switch.enabled,
+        kill_file_path = %config.kill_switch.kill_file_path,
+        kill_env_var = %config.kill_switch.kill_env_var,
+        max_drawdown_24h_usd = %config.kill_switch.max_drawdown_24h_usd,
+        "kill switch configured"
+    );
+
     info!("Running initial Kalshi market scan...");
     match scanner.refresh().await {
         Ok(count) => info!(count, "Initial scan complete"),
         Err(e) => warn!(error = %e, "Initial scan failed; continuing with empty market set"),
+    }
+
+    let mut risk = RiskManager::new(config.risk.clone());
+    info!(
+        max_position_size_usd = %config.risk.max_position_size_usd,
+        max_total_exposure_usd = %config.risk.max_total_exposure_usd,
+        max_concurrent_positions = config.risk.max_concurrent_positions,
+        per_market_cooldown_secs = config.risk.per_market_cooldown_secs,
+        bankroll_usd = %config.risk.bankroll_usd,
+        "risk caps active"
+    );
+    info!(
+        gefs_enabled = config.forecast.gefs_sigma_enabled,
+        gefs_refresh_secs = config.forecast.gefs_refresh_interval_secs,
+        "GEFS σ source"
+    );
+
+    if cli.once {
+        info!("--once: running a single strategy pass then exiting");
+        run_one_pass(
+            &scanner,
+            &nws,
+            &gefs,
+            &forecast_cache,
+            &ensemble_cache,
+            &config,
+            &decision_logger,
+            &mut risk,
+        )
+        .await;
+        info!("--once pass complete; exiting");
+        return Ok(());
     }
 
     // Periodic market-list refresh.
@@ -108,24 +188,12 @@ async fn main() -> Result<()> {
     let cache_for_strat = forecast_cache.clone();
     let ensemble_for_strat = ensemble_cache.clone();
     let logger_for_strat = decision_logger.clone();
-    let mut risk_for_strat = RiskManager::new(config.risk.clone());
-    info!(
-        max_position_size_usd = %config.risk.max_position_size_usd,
-        max_total_exposure_usd = %config.risk.max_total_exposure_usd,
-        max_concurrent_positions = config.risk.max_concurrent_positions,
-        "risk caps active"
-    );
-    info!(
-        gefs_enabled = config.forecast.gefs_sigma_enabled,
-        gefs_refresh_secs = config.forecast.gefs_refresh_interval_secs,
-        "GEFS σ source"
-    );
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(poll_ms));
         interval.tick().await;
         loop {
             interval.tick().await;
-            run_strategy_pass(
+            run_one_pass(
                 &scanner_for_strat,
                 &nws_for_strat,
                 &gefs_for_strat,
@@ -133,17 +201,74 @@ async fn main() -> Result<()> {
                 &ensemble_for_strat,
                 &cfg_for_strat,
                 &logger_for_strat,
-                &mut risk_for_strat,
+                &mut risk,
             )
             .await;
         }
     });
 
-    info!("Strategy loop running in dry-run; ctrl+C to exit");
-
-    tokio::signal::ctrl_c().await?;
+    info!("Strategy loop running; SIGINT/SIGTERM to exit");
+    wait_for_shutdown_signal().await;
     info!("Shutting down");
     Ok(())
+}
+
+/// Wait for either SIGINT (ctrl+C) or SIGTERM, whichever lands first.
+/// SIGTERM is what systemd sends on `systemctl stop`, so handling it
+/// matches the dynamic-kill-switch story: an operator should be able to
+/// halt the bot in seconds without redeploying. On non-Unix platforms
+/// SIGTERM is unavailable; we fall back to SIGINT alone.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "failed to install SIGTERM handler; falling back to ctrl+C only");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => info!(signal = "SIGINT", "shutdown signal received"),
+            _ = term.recv() => info!(signal = "SIGTERM", "shutdown signal received"),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        info!(signal = "SIGINT", "shutdown signal received");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_one_pass(
+    scanner: &MarketScanner,
+    nws: &NwsClient,
+    gefs: &GefsClient,
+    cache: &ForecastCache,
+    ensemble_cache: &EnsembleCache,
+    cfg: &AppConfig,
+    logger: &DecisionLogger,
+    risk: &mut RiskManager,
+) {
+    // Dynamic kill switch: cheapest possible check, runs every pass.
+    // `realised_loss_24h_usd = None` until the executor lands a fill
+    // ledger; the soft kill stays inert in dry-run regardless.
+    match evaluate_kill_switch(&cfg.kill_switch, None) {
+        KillState::Active => {}
+        KillState::Halted(reason) => {
+            warn!(
+                kill_reason = reason.tag(),
+                kill_detail = %reason,
+                "kill switch active; skipping strategy pass"
+            );
+            return;
+        }
+    }
+
+    run_strategy_pass(scanner, nws, gefs, cache, ensemble_cache, cfg, logger, risk).await;
 }
 
 /// Read tracked markets, refresh forecasts on demand, run pricing + EV gate
@@ -194,19 +319,21 @@ async fn run_strategy_pass(
         // Refresh-on-demand: if we don't have a forecast for this city or it's
         // older than refresh_interval_secs, fetch a fresh one. NWS rate-limits
         // shared User-Agents so we keep it serial here.
-        let needs_refresh = {
+        let cached_ts = {
             let read = cache.read().await;
-            match read.get(city_code) {
-                None => true,
-                Some((_, ts)) => {
-                    Utc::now()
-                        .signed_duration_since(*ts)
-                        .to_std()
-                        .unwrap_or_default()
-                        > refresh_after
-                }
+            read.get(city_code).map(|(_, ts)| *ts)
+        };
+        let needs_refresh = match cached_ts {
+            None => true,
+            Some(ts) => {
+                Utc::now()
+                    .signed_duration_since(ts)
+                    .to_std()
+                    .unwrap_or_default()
+                    > refresh_after
             }
         };
+        let mut refresh_failed = false;
         if needs_refresh {
             match nws.fetch_point_forecast(city.lat, city.lon).await {
                 Ok(f) => {
@@ -215,10 +342,37 @@ async fn run_strategy_pass(
                 }
                 Err(e) => {
                     warn!(city = city_code, error = %e, "NWS forecast fetch failed");
-                    summary.forecast_fetch_failed += 1;
-                    continue;
+                    refresh_failed = true;
                 }
             }
+        }
+
+        // After (any) refresh attempt, classify the cached value's
+        // freshness. If it's past 2× the refresh interval AND we just
+        // failed to fix it, treat the source as broken — log distinctly
+        // and skip rather than serve stale data.
+        if refresh_failed {
+            let freshness = classify_source_freshness(
+                cached_ts,
+                refresh_after,
+                SOURCE_STALENESS_MULTIPLIER,
+                Utc::now(),
+            );
+            if let SourceFreshness::Stale { age, threshold } = freshness {
+                warn!(
+                    source = "nws",
+                    city = city_code,
+                    age_secs = age.as_secs(),
+                    threshold_secs = threshold.as_secs(),
+                    "source_stale: skipping market — NWS cache past staleness threshold and refresh failed"
+                );
+                summary.nws_source_stale += 1;
+                continue;
+            }
+            // Stale-but-not-yet-stale-enough OR cold-start — count as a
+            // plain fetch failure (existing behaviour).
+            summary.forecast_fetch_failed += 1;
+            continue;
         }
 
         let forecast = {
@@ -237,7 +391,11 @@ async fn run_strategy_pass(
         // every 6h. Failures fall back silently to the static σ table; no
         // reason to abandon the trade just because one source is down.
         let sigma_override = if cfg.forecast.gefs_sigma_enabled {
-            ensure_ensemble_fresh(gefs, ensemble_cache, city, ensemble_refresh_after).await;
+            let stale =
+                ensure_ensemble_fresh(gefs, ensemble_cache, city, ensemble_refresh_after).await;
+            if stale {
+                summary.gefs_source_stale += 1;
+            }
             resolve_gefs_sigma(ensemble_cache, city, &tracked.threshold).await
         } else {
             None
@@ -266,7 +424,13 @@ async fn run_strategy_pass(
         let decision =
             match nws_lockout_decision(&forecast, cfg.forecast.nws_lockout_after_update_secs) {
                 Some(reason) => Decision::NoTrade(reason),
-                None => decide(&tracked.market, &pricing, &cfg.strategy, &fees),
+                None => decide(
+                    &tracked.market,
+                    &pricing,
+                    &cfg.strategy,
+                    &fees,
+                    cfg.risk.bankroll_usd,
+                ),
             };
         summary.tally_decision(&decision);
 
@@ -275,6 +439,7 @@ async fn run_strategy_pass(
             &tracked.threshold,
             &pricing,
             &decision,
+            cfg.execution.mode,
             Utc::now(),
         );
         if let Err(e) = logger.record(&record).await {
@@ -285,9 +450,12 @@ async fn run_strategy_pass(
 
         // Run Trade signals through the risk layer. Position-size and
         // total-exposure caps may clip the contract count; the concurrent-
-        // positions cap may reject outright.
+        // positions cap may reject outright; the per-market cooldown may
+        // reject if we just emitted a signal for this market.
         if let Decision::Trade(sig, _) = &decision {
-            apply_risk(risk, sig);
+            if let Some(reject) = apply_risk(risk, sig) {
+                summary.tally_risk_reject(&reject);
+            }
         }
     }
 
@@ -314,6 +482,22 @@ struct PassSummary {
     outside_horizon: usize,
     forecast_fetch_failed: usize,
     pricing_failed: usize,
+    /// Risk-layer rejections. These are post-`Decision::Trade` and don't
+    /// reduce `traded`; they tell us how much of the strategy's intent
+    /// the risk manager filtered out.
+    risk_in_cooldown: usize,
+    risk_concurrent_capped: usize,
+    risk_no_budget: usize,
+    /// NWS forecasts skipped because the cached value crossed the
+    /// staleness threshold and a refresh attempt failed. One per market
+    /// affected — operator should grep `source_stale` log lines for
+    /// the underlying error rate.
+    nws_source_stale: usize,
+    /// GEFS ensemble σ skipped because the cached run is stale. Falls
+    /// back to the static σ table; not a fatal condition. Counted
+    /// separately so the operator can tell whether the bot has been
+    /// running on the static table all day.
+    gefs_source_stale: usize,
 }
 
 impl PassSummary {
@@ -328,6 +512,14 @@ impl PassSummary {
                 NoTradeReason::PriceOutOfBand { .. } => self.price_out_of_band += 1,
                 NoTradeReason::ForecastTooFresh { .. } => self.forecast_too_fresh += 1,
             },
+        }
+    }
+
+    fn tally_risk_reject(&mut self, reject: &RejectReason) {
+        match reject {
+            RejectReason::InCooldown { .. } => self.risk_in_cooldown += 1,
+            RejectReason::ConcurrentPositionsCapped => self.risk_concurrent_capped += 1,
+            RejectReason::NoBudgetRemaining => self.risk_no_budget += 1,
         }
     }
 
@@ -346,6 +538,11 @@ impl PassSummary {
             outside_horizon = self.outside_horizon,
             forecast_fetch_failed = self.forecast_fetch_failed,
             pricing_failed = self.pricing_failed,
+            risk_in_cooldown = self.risk_in_cooldown,
+            risk_concurrent_capped = self.risk_concurrent_capped,
+            risk_no_budget = self.risk_no_budget,
+            nws_source_stale = self.nws_source_stale,
+            gefs_source_stale = self.gefs_source_stale,
             "strategy pass complete"
         );
     }
@@ -355,27 +552,33 @@ impl PassSummary {
 /// Failures are logged at warn but do not propagate — the strategy loop
 /// falls back to the static σ table whenever no fresh ensemble is
 /// available.
+///
+/// Returns `true` when the cache crossed the staleness threshold AND the
+/// most recent refresh attempt failed. The caller treats this as
+/// "ensemble σ is unavailable" (falls back to static) and increments the
+/// `gefs_source_stale` counter.
 async fn ensure_ensemble_fresh(
     gefs: &GefsClient,
     cache: &EnsembleCache,
     city: &CitySpec,
     refresh_after: Duration,
-) {
-    let needs_refresh = {
+) -> bool {
+    let cached_ts = {
         let read = cache.read().await;
-        match read.get(city.kalshi_code) {
-            None => true,
-            Some((_, ts)) => {
-                Utc::now()
-                    .signed_duration_since(*ts)
-                    .to_std()
-                    .unwrap_or_default()
-                    > refresh_after
-            }
+        read.get(city.kalshi_code).map(|(_, ts)| *ts)
+    };
+    let needs_refresh = match cached_ts {
+        None => true,
+        Some(ts) => {
+            Utc::now()
+                .signed_duration_since(ts)
+                .to_std()
+                .unwrap_or_default()
+                > refresh_after
         }
     };
     if !needs_refresh {
-        return;
+        return false;
     }
     // 7 forecast days covers everything NWS prices today and gives the
     // pricing layer a horizon match for any in-horizon market.
@@ -383,9 +586,29 @@ async fn ensure_ensemble_fresh(
         Ok(f) => {
             let mut write = cache.write().await;
             write.insert(city.kalshi_code.to_string(), (f, Utc::now()));
+            false
         }
         Err(e) => {
-            warn!(city = city.kalshi_code, error = %e, "GEFS ensemble fetch failed; falling back to static σ");
+            let freshness = classify_source_freshness(
+                cached_ts,
+                refresh_after,
+                SOURCE_STALENESS_MULTIPLIER,
+                Utc::now(),
+            );
+            if let SourceFreshness::Stale { age, threshold } = freshness {
+                warn!(
+                    source = "gefs",
+                    city = city.kalshi_code,
+                    error = %e,
+                    age_secs = age.as_secs(),
+                    threshold_secs = threshold.as_secs(),
+                    "source_stale: GEFS cache past staleness threshold and refresh failed; falling back to static σ"
+                );
+                true
+            } else {
+                warn!(city = city.kalshi_code, error = %e, "GEFS ensemble fetch failed; falling back to static σ");
+                false
+            }
         }
     }
 }
@@ -433,7 +656,9 @@ fn nws_lockout_decision(forecast: &Forecast, lockout_secs: u64) -> Option<NoTrad
     }
 }
 
-fn apply_risk(risk: &mut RiskManager, signal: &weather_types::Signal) {
+/// Apply risk caps to a strategy signal. Returns the reject reason (if any)
+/// so the per-pass summary can tally how often each cap fires.
+fn apply_risk(risk: &mut RiskManager, signal: &weather_types::Signal) -> Option<RejectReason> {
     let original_contracts = signal.contracts;
     match risk.evaluate(signal.clone()) {
         RiskDecision::Approve(s) => {
@@ -444,6 +669,7 @@ fn apply_risk(risk: &mut RiskManager, signal: &weather_types::Signal) {
                 pass_exposure_usd = %risk.pass_exposure_usd(),
                 "risk: approved"
             );
+            None
         }
         RiskDecision::Adjusted(s, reason) => {
             info!(
@@ -455,6 +681,7 @@ fn apply_risk(risk: &mut RiskManager, signal: &weather_types::Signal) {
                 pass_exposure_usd = %risk.pass_exposure_usd(),
                 "risk: clipped position size"
             );
+            None
         }
         RiskDecision::Reject(reason) => {
             info!(
@@ -464,6 +691,7 @@ fn apply_risk(risk: &mut RiskManager, signal: &weather_types::Signal) {
                 pass_position_count = risk.pass_position_count(),
                 "risk: rejected"
             );
+            Some(reason)
         }
     }
 }

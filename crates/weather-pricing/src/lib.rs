@@ -94,6 +94,46 @@ pub const SIGMA_SOURCE_STATIC: &str = "static";
 pub const SIGMA_SOURCE_GEFS_ENSEMBLE: &str = "gefs_ensemble";
 
 /// Compute a model probability for a single Kalshi weather market.
+///
+/// Sanity-anchor: when the NWS forecast for the market's day equals the
+/// threshold exactly, P(YES | "≥ T") sits right around 0.5 — the model
+/// shouldn't pretend "exactly on the strike" is an edge.
+///
+/// ```
+/// use chrono::{DateTime, NaiveDate, Utc};
+/// use weather_pricing::price_market;
+/// use weather_types::{Forecast, ForecastPeriod, TempStat, ThresholdDirection, WeatherThreshold};
+///
+/// fn dt(s: &str) -> DateTime<Utc> {
+///     DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+/// }
+/// let forecast = Forecast {
+///     lat: 40.78, lon: -73.97,
+///     fetched_at: dt("2026-07-03T12:00:00Z"),
+///     generated_at: None,
+///     periods: vec![ForecastPeriod {
+///         name: "Saturday".into(),
+///         is_daytime: true,
+///         temperature_f: 75,
+///         precipitation_probability_pct: None,
+///         start_time: dt("2026-07-04T10:00:00Z"),
+///         end_time: dt("2026-07-04T22:00:00Z"),
+///         detailed_forecast: "".into(),
+///     }],
+/// };
+/// let threshold = WeatherThreshold {
+///     city: "NY".into(),
+///     stat: TempStat::DailyHigh,
+///     direction: ThresholdDirection::AtOrAbove,
+///     temperature_f: 75,
+///     date: NaiveDate::from_ymd_opt(2026, 7, 4).unwrap(),
+/// };
+/// let p = price_market(&threshold, &forecast).unwrap();
+/// let pf: f64 = p.yes_probability.try_into().unwrap();
+/// // Forecast equals threshold ⇒ P(YES) ≈ 0.5 (slightly higher because
+/// // continuity correction shifts mass into the ≥-side bucket).
+/// assert!(pf > 0.5 && pf < 0.7, "got {}", pf);
+/// ```
 pub fn price_market(
     threshold: &WeatherThreshold,
     forecast: &Forecast,
@@ -166,6 +206,17 @@ fn period_overlaps_window(
 /// Standard deviation of the NWS forecast error, as a function of horizon in
 /// days. Calibrated by hand from publicly reported NWS day-1..day-7 verifs.
 /// Day 0 / day 1 ≈ 2°F, growing to ~5°F at day 7, capped at 6°F beyond.
+///
+/// ```
+/// use weather_pricing::sigma_for_horizon;
+/// // σ widens monotonically with horizon — a day-6 forecast is noisier
+/// // than a day-1 forecast, and that's load-bearing for the EV gate.
+/// assert!(sigma_for_horizon(1) < sigma_for_horizon(3));
+/// assert!(sigma_for_horizon(3) < sigma_for_horizon(7));
+/// // Beyond 7 days we cap at 6°F rather than extrapolating linearly into
+/// // garbage; the static table shouldn't pretend day-30 is precise.
+/// assert!((sigma_for_horizon(30) - 6.0).abs() < 1e-9);
+/// ```
 pub fn sigma_for_horizon(horizon_days: i64) -> f64 {
     match horizon_days {
         0 => 1.6,
@@ -199,6 +250,16 @@ fn yes_probability(forecast_mu: i32, threshold: &WeatherThreshold, sigma: f64) -
 /// Standard Normal CDF Φ(z). Implemented via the Abramowitz–Stegun 26.2.17
 /// approximation (max abs error ≈ 7.5e-8) — accurate enough for sub-cent
 /// probability differences.
+///
+/// ```
+/// use weather_pricing::normal_cdf;
+/// // Median of the standard Normal — exactly 0.5.
+/// assert!((normal_cdf(0.0) - 0.5).abs() < 1e-9);
+/// // ±1σ ≈ 0.8413 / 0.1587 — the canonical "1 standard deviation" tail.
+/// assert!((normal_cdf(1.0) - 0.8413).abs() < 1e-3);
+/// // CDF is symmetric: Φ(z) + Φ(−z) = 1.
+/// assert!((normal_cdf(2.5) + normal_cdf(-2.5) - 1.0).abs() < 1e-9);
+/// ```
 pub fn normal_cdf(z: f64) -> f64 {
     if z.is_nan() {
         return f64::NAN;

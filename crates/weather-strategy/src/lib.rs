@@ -21,50 +21,13 @@ pub mod fees;
 use chrono::Utc;
 use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use uuid::Uuid;
 
 use weather_config::StrategyConfig;
 use weather_pricing::ModelPricing;
-use weather_types::{KalshiMarket, Side, Signal};
+use weather_types::{KalshiMarket, OrderbookQuote, Side, Signal};
 
 pub use fees::{estimate_fee_per_contract, FeeModel};
-
-/// Best bid/ask in dollars for both sides.
-#[derive(Debug, Clone, Copy)]
-pub struct OrderbookQuote {
-    pub yes_bid: Option<Decimal>,
-    pub yes_ask: Option<Decimal>,
-}
-
-impl OrderbookQuote {
-    pub fn from_market(m: &KalshiMarket) -> Self {
-        Self {
-            yes_bid: m.yes_bid,
-            yes_ask: m.yes_ask,
-        }
-    }
-
-    /// YES ask is the price you pay to buy YES. NO ask, by Kalshi binary
-    /// no-arb, equals (1 - yes_bid). The Kalshi orderbook docs make this
-    /// explicit: "implied YES ask = 1 - best NO bid; YES spread = ask - bid".
-    pub fn yes_ask(&self) -> Option<Decimal> {
-        self.yes_ask
-    }
-
-    /// NO ask = 1 - yes_bid (you sell YES at the bid, equivalent to buying NO).
-    pub fn no_ask(&self) -> Option<Decimal> {
-        self.yes_bid.map(|b| Decimal::ONE - b)
-    }
-
-    /// YES bid-ask spread, when both sides are quoted.
-    pub fn yes_spread(&self) -> Option<Decimal> {
-        match (self.yes_ask, self.yes_bid) {
-            (Some(a), Some(b)) => Some(a - b),
-            _ => None,
-        }
-    }
-}
 
 /// What the strategy decided about a market, and why. The explicit `NoTrade`
 /// branch is what dry-run logs print so the operator can see edge framework
@@ -166,14 +129,20 @@ impl std::fmt::Display for NoTradeReason {
     }
 }
 
-/// Edge-aware decision for one market. `contract_size_cap` is passed
-/// separately because position sizing is the risk layer's job — the strategy
-/// only proposes the side and the price.
+/// Edge-aware decision for one market.
+///
+/// `bankroll_usd` is the notional bankroll Kelly sizes against. The strategy
+/// proposes a contract count from `kelly_fraction * f* * bankroll / price`;
+/// the risk layer then applies the per-market and per-pass dollar caps.
+/// Without a real bankroll input, Kelly was previously computed against an
+/// implicit $1 — the cap did all the sizing and `kelly_fraction` was
+/// purely cosmetic.
 pub fn decide(
     market: &KalshiMarket,
     pricing: &ModelPricing,
     cfg: &StrategyConfig,
     fees: &FeeModel,
+    bankroll_usd: Decimal,
 ) -> Decision {
     let quote = OrderbookQuote::from_market(market);
     let yes_ask = match quote.yes_ask() {
@@ -250,7 +219,7 @@ pub fn decide(
         required_net_ev: required,
     };
 
-    let contracts = kelly_contracts(net_ev, price, cfg.kelly_fraction);
+    let contracts = kelly_contracts(raw_edge, price, cfg.kelly_fraction, bankroll_usd);
     let signal = Signal {
         id: Uuid::new_v4(),
         market_ticker: market.ticker.clone(),
@@ -284,22 +253,41 @@ fn side_ev(_side: Side, price: Decimal, our_p: Decimal, fees: &FeeModel) -> Side
     }
 }
 
-/// Kelly-fractional contract count given net EV and a Kelly multiplier.
-/// We don't have bankroll wired in here (that's the risk layer's job), so
-/// this returns a unit-scale "if you had $X bankroll, take f*Kelly% of it"
-/// hint that the risk layer translates into actual contracts. v1 keeps it
-/// simple: floor of `1 / price` contracts, scaled by Kelly fraction. The
-/// risk manager applies the real cap.
-fn kelly_contracts(net_ev: Decimal, price: Decimal, kelly_frac: Decimal) -> u32 {
-    if net_ev <= Decimal::ZERO || price <= Decimal::ZERO {
+/// Kelly-fractional contract count.
+///
+/// For a Kalshi binary contract bought at price `p` with our model probability
+/// `q_w` of YES winning, the full-Kelly stake fraction is
+///     f* = (q_w − p) / (1 − p)   = raw_edge / (1 − p)
+/// The dollar stake is `bankroll * kelly_fraction * f*`, and contracts are
+/// `floor(stake / price)`. The risk manager then clamps that against the
+/// per-market and per-pass dollar ceilings.
+///
+/// We pass the raw edge (not net EV) because Kelly is about probability
+/// edge, not realised P&L. The fee/safety-buffer math has already happened
+/// in the EV gate; if we made it here we know the trade clears net of cost.
+/// `raw_edge` is non-negative by construction in `decide`.
+fn kelly_contracts(
+    raw_edge: Decimal,
+    price: Decimal,
+    kelly_frac: Decimal,
+    bankroll_usd: Decimal,
+) -> u32 {
+    if raw_edge <= Decimal::ZERO
+        || price <= Decimal::ZERO
+        || price >= Decimal::ONE
+        || bankroll_usd <= Decimal::ZERO
+        || kelly_frac <= Decimal::ZERO
+    {
         return 0;
     }
-    // Kelly fraction of full Kelly = f* = (p*b - q) / b, simplified to
-    // (model_edge / (1 - price)). For v1, use 1 contract scaled by Kelly
-    // fraction — the risk layer enforces $-caps.
-    let raw = (net_ev / price).max(dec!(0));
-    let scaled = raw * kelly_frac * dec!(100); // unit-scale hint
-    scaled.to_u32().unwrap_or(1).max(1)
+    let one_minus_p = Decimal::ONE - price;
+    if one_minus_p <= Decimal::ZERO {
+        return 0;
+    }
+    let f_star = raw_edge / one_minus_p;
+    let stake = bankroll_usd * kelly_frac * f_star;
+    let contracts = (stake / price).floor();
+    contracts.to_u32().unwrap_or(0).max(1)
 }
 
 #[cfg(test)]
@@ -348,11 +336,17 @@ mod tests {
         }
     }
 
+    fn test_bankroll() -> Decimal {
+        // $100 default — same as the toy bankroll in `config/default.toml`.
+        // Tests that *care* about Kelly math override this explicitly.
+        dec!(100)
+    }
+
     #[test]
     fn orderbook_no_quote_is_no_trade() {
         let m = market(None, None);
         let p = pricing(dec!(0.8));
-        let d = decide(&m, &p, &cfg(), &FeeModel::default());
+        let d = decide(&m, &p, &cfg(), &FeeModel::default(), test_bankroll());
         assert!(matches!(d, Decision::NoTrade(NoTradeReason::NoOrderbook)));
     }
 
@@ -369,7 +363,7 @@ mod tests {
         // YES spread = 0.50 - 0.10 = 0.40, far above max 0.10.
         let m = market(Some(dec!(0.10)), Some(dec!(0.50)));
         let p = pricing(dec!(0.99));
-        let d = decide(&m, &p, &cfg(), &FeeModel::default());
+        let d = decide(&m, &p, &cfg(), &FeeModel::default(), test_bankroll());
         match d {
             Decision::NoTrade(NoTradeReason::SpreadTooWide { spread, max }) => {
                 assert_eq!(spread, dec!(0.40));
@@ -384,7 +378,7 @@ mod tests {
         // Model P = 0.55, YES ask = 0.54 → raw edge 0.01, below min 0.05.
         let m = market(Some(dec!(0.50)), Some(dec!(0.54)));
         let p = pricing(dec!(0.55));
-        let d = decide(&m, &p, &cfg(), &FeeModel::default());
+        let d = decide(&m, &p, &cfg(), &FeeModel::default(), test_bankroll());
         assert!(matches!(
             d,
             Decision::NoTrade(NoTradeReason::EdgeBelowMin { .. })
@@ -397,7 +391,7 @@ mod tests {
         // safety buffer this trades.
         let m = market(Some(dec!(0.45)), Some(dec!(0.50)));
         let p = pricing(dec!(0.85));
-        let d = decide(&m, &p, &cfg(), &FeeModel::default());
+        let d = decide(&m, &p, &cfg(), &FeeModel::default(), test_bankroll());
         match d {
             Decision::Trade(sig, ev) => {
                 assert_eq!(sig.side, Side::Yes);
@@ -417,7 +411,7 @@ mod tests {
         // = 0.55, NO probability = 0.90. NO is the side with edge.
         let m = market(Some(dec!(0.45)), Some(dec!(0.50)));
         let p = pricing(dec!(0.10));
-        let d = decide(&m, &p, &cfg(), &FeeModel::default());
+        let d = decide(&m, &p, &cfg(), &FeeModel::default(), test_bankroll());
         match d {
             Decision::Trade(sig, ev) => {
                 assert_eq!(sig.side, Side::No);
@@ -437,7 +431,7 @@ mod tests {
         let p = pricing(dec!(0.55));
         let mut c = cfg();
         c.safety_buffer = dec!(0.20);
-        let d = decide(&m, &p, &c, &FeeModel::default());
+        let d = decide(&m, &p, &c, &FeeModel::default(), test_bankroll());
         assert!(
             matches!(d, Decision::NoTrade(NoTradeReason::EvBelowGate { .. })),
             "got {:?}",
@@ -452,7 +446,7 @@ mod tests {
         // 0.20, so the asymmetric tail-blow-up risk gate fires.
         let m = market(Some(dec!(0.05)), Some(dec!(0.10)));
         let p = pricing(dec!(0.85));
-        let d = decide(&m, &p, &cfg(), &FeeModel::default());
+        let d = decide(&m, &p, &cfg(), &FeeModel::default(), test_bankroll());
         match d {
             Decision::NoTrade(NoTradeReason::PriceOutOfBand { price, min, max }) => {
                 assert_eq!(price, dec!(0.10));
@@ -469,11 +463,56 @@ mod tests {
         // min_edge), but the ceiling at 0.92 kicks in before EvBelowGate.
         let m = market(Some(dec!(0.93)), Some(dec!(0.95)));
         let p = pricing(dec!(1.0));
-        let d = decide(&m, &p, &cfg(), &FeeModel::default());
+        let d = decide(&m, &p, &cfg(), &FeeModel::default(), test_bankroll());
         assert!(
             matches!(d, Decision::NoTrade(NoTradeReason::PriceOutOfBand { .. })),
             "got {:?}",
             d
+        );
+    }
+
+    #[test]
+    fn kelly_contracts_scales_with_bankroll() {
+        // raw_edge=0.20, price=0.50 → f* = 0.20 / 0.50 = 0.40
+        // quarter-Kelly = 0.10 fraction
+        // bankroll $100 → $10 stake → 20 contracts at $0.50
+        let n100 = kelly_contracts(dec!(0.20), dec!(0.50), dec!(0.25), dec!(100));
+        assert_eq!(n100, 20);
+
+        // Doubling bankroll doubles the contract count.
+        let n200 = kelly_contracts(dec!(0.20), dec!(0.50), dec!(0.25), dec!(200));
+        assert_eq!(n200, 40);
+
+        // No bankroll → no size.
+        let n0 = kelly_contracts(dec!(0.20), dec!(0.50), dec!(0.25), dec!(0));
+        assert_eq!(n0, 0);
+    }
+
+    #[test]
+    fn kelly_contracts_uses_full_kelly_formula_against_one_minus_p() {
+        // raw_edge=0.10, price=0.80 → f* = 0.10 / 0.20 = 0.50
+        // quarter-Kelly = 0.125 fraction; bankroll $100 → $12.50 stake;
+        // 12.50 / 0.80 = 15.625 → floor = 15 contracts.
+        let n = kelly_contracts(dec!(0.10), dec!(0.80), dec!(0.25), dec!(100));
+        assert_eq!(n, 15);
+    }
+
+    #[test]
+    fn kelly_contracts_minimum_is_one_when_edge_positive() {
+        // Tiny edge that would round down to zero contracts. We still
+        // emit one — the strategy already cleared every quality gate by
+        // the time `kelly_contracts` runs, and a one-contract minimum is
+        // cheap enough to be preferable to an awkward "decided to trade
+        // but emitted 0 contracts" outcome.
+        let n = kelly_contracts(dec!(0.001), dec!(0.50), dec!(0.25), dec!(1));
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn kelly_contracts_zero_edge_is_zero_size() {
+        assert_eq!(
+            kelly_contracts(Decimal::ZERO, dec!(0.50), dec!(0.25), dec!(100)),
+            0
         );
     }
 
@@ -484,7 +523,7 @@ mod tests {
         let p = pricing(dec!(0.85));
         let mut c = cfg();
         c.min_price = dec!(0.05);
-        let d = decide(&m, &p, &c, &FeeModel::default());
+        let d = decide(&m, &p, &c, &FeeModel::default(), test_bankroll());
         assert!(matches!(d, Decision::Trade(_, _)), "got {:?}", d);
     }
 }

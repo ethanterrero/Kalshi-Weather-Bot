@@ -16,8 +16,34 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
+    /// No order placement. Strategy logs decisions only.
     DryRun,
+    /// Same code path as `Live` but routed through a paper-trade endpoint
+    /// (or local mock simulating fills against the real orderbook).
+    /// Surfaces lifecycle bugs that dry-run can't catch.
+    Paper,
+    /// Real money. Requires `KALSHI_ENV=prod` and the executor's
+    /// `never_send` to be explicitly disabled in code.
     Live,
+}
+
+impl ExecutionMode {
+    /// Stable lowercase string used in structured logs and the JSONL
+    /// decision record. Backtests/replay split metrics on this so dry-run,
+    /// paper, and live data don't get pooled.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExecutionMode::DryRun => "dry_run",
+            ExecutionMode::Paper => "paper",
+            ExecutionMode::Live => "live",
+        }
+    }
+}
+
+impl std::fmt::Display for ExecutionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 fn default_execution_mode() -> ExecutionMode {
@@ -49,6 +75,11 @@ pub struct AppConfig {
     pub risk: RiskConfig,
     pub monitor: MonitorConfig,
     pub logging: LoggingConfig,
+    /// Dynamic kill switch — a way for the operator to halt the bot in
+    /// seconds without redeploying. Distinct from the executor's static
+    /// `never_send=true` (which requires a code change).
+    #[serde(default)]
+    pub kill_switch: KillSwitchConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -165,6 +196,80 @@ pub struct RiskConfig {
     pub max_total_exposure_usd: Decimal,
     pub per_market_cooldown_secs: u64,
     pub max_concurrent_positions: usize,
+    /// Notional bankroll the strategy's Kelly fraction sizes against.
+    /// Quarter-Kelly of `bankroll_usd * (edge/odds)` is the contract-count
+    /// hint; the per-market and per-pass dollar caps then clamp it. Without
+    /// this, Kelly is computed against an implicit $1 and the cap does all
+    /// the sizing work.
+    #[serde(default = "default_bankroll_usd")]
+    pub bankroll_usd: Decimal,
+}
+
+fn default_bankroll_usd() -> Decimal {
+    // $100 bankroll = an intentional toy default. Override per-operator.
+    Decimal::from(100)
+}
+
+/// File-flag + env-var + drawdown soft-kill bundle.
+///
+/// Each check is cheap and fails in a different way:
+///   - `kill_file_path` — operator drops a file on disk, bot halts on the
+///     next pass; survives bot restart unless removed.
+///   - `kill_env_var` — set in the systemd unit before SIGHUP; useful when
+///     the operator can't write to the working directory.
+///   - `max_drawdown_24h_usd` — bot halts itself after a configured loss
+///     within 24h. Static kill is the operator protecting the bot; this is
+///     the bot protecting the operator from a bad day.
+///
+/// SIGTERM cancellation is handled in the bot loop, not configured here:
+/// it always cancels in-flight work and exits cleanly when received.
+#[derive(Debug, Clone, Deserialize)]
+pub struct KillSwitchConfig {
+    /// Master switch. When `false`, the file/env/drawdown checks are
+    /// skipped entirely (SIGTERM still works). Defaults to `true` so a
+    /// fresh deploy is safe by default.
+    #[serde(default = "default_kill_switch_enabled")]
+    pub enabled: bool,
+    /// Path watched once per strategy pass. Existence (regardless of
+    /// content) halts new orders. Default `./KILL` — relative to the
+    /// bot's CWD.
+    #[serde(default = "default_kill_file_path")]
+    pub kill_file_path: String,
+    /// Environment variable inspected once per pass. Any non-empty value
+    /// other than `0`/`false` halts new orders. Default
+    /// `WEATHER_BOT_KILL`.
+    #[serde(default = "default_kill_env_var")]
+    pub kill_env_var: String,
+    /// Maximum cumulative realised loss (in USD) inside a 24h rolling
+    /// window before the bot refuses new orders. `0` or negative disables
+    /// the soft kill. Default `0` (disabled) until live trading lands;
+    /// the dry-run bot has no realised P&L yet to enforce against.
+    #[serde(default = "default_max_drawdown_usd")]
+    pub max_drawdown_24h_usd: Decimal,
+}
+
+impl Default for KillSwitchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_kill_switch_enabled(),
+            kill_file_path: default_kill_file_path(),
+            kill_env_var: default_kill_env_var(),
+            max_drawdown_24h_usd: default_max_drawdown_usd(),
+        }
+    }
+}
+
+fn default_kill_switch_enabled() -> bool {
+    true
+}
+fn default_kill_file_path() -> String {
+    "./KILL".to_string()
+}
+fn default_kill_env_var() -> String {
+    "WEATHER_BOT_KILL".to_string()
+}
+fn default_max_drawdown_usd() -> Decimal {
+    Decimal::ZERO
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -216,5 +321,36 @@ impl AppConfig {
     pub fn kalshi_private_key_path() -> Result<String, ConfigError> {
         std::env::var("KALSHI_PRIVATE_KEY_PATH")
             .map_err(|_| ConfigError::MissingEnv("KALSHI_PRIVATE_KEY_PATH".to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execution_mode_str_round_trip_matches_serde_tag() {
+        assert_eq!(ExecutionMode::DryRun.as_str(), "dry_run");
+        assert_eq!(ExecutionMode::Paper.as_str(), "paper");
+        assert_eq!(ExecutionMode::Live.as_str(), "live");
+    }
+
+    #[test]
+    fn execution_mode_display_uses_stable_lowercase_tag() {
+        assert_eq!(format!("{}", ExecutionMode::DryRun), "dry_run");
+        assert_eq!(format!("{}", ExecutionMode::Paper), "paper");
+        assert_eq!(format!("{}", ExecutionMode::Live), "live");
+    }
+
+    #[test]
+    fn kill_switch_default_is_safe_and_dry_run_flavoured() {
+        let k = KillSwitchConfig::default();
+        assert!(k.enabled);
+        assert_eq!(k.kill_file_path, "./KILL");
+        assert_eq!(k.kill_env_var, "WEATHER_BOT_KILL");
+        // Drawdown soft-kill is disabled by default — dry-run has no
+        // realised P&L to enforce against, so a non-zero default would
+        // be an immediate no-op or worse, false-positive.
+        assert_eq!(k.max_drawdown_24h_usd, Decimal::ZERO);
     }
 }

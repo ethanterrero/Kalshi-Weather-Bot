@@ -11,14 +11,18 @@
 //! struct is the right place to plug in a persisted positions view from
 //! `/portfolio/positions`.
 //!
-//! v1 scope (matches Phase 6 of the roadmap, items 1/2/5):
+//! v1 scope (matches Phase 6 of the roadmap, items 1/2/4/5):
 //!   - per-market position cap (`max_position_size_usd`)
 //!   - per-pass total exposure cap (`max_total_exposure_usd`)
+//!   - per-market cooldown (`per_market_cooldown_secs`)
 //!   - concurrent positions cap (`max_concurrent_positions`)
 //!
-//! Out of scope here, will land later: per-market cooldown, per-(city,date)
-//! correlated-exposure cap, bankroll-fraction Kelly, kill switch.
+//! Out of scope here, will land later: per-(city,date) correlated-exposure
+//! cap, kill switch (lives in `weather-bot`).
 
+use std::collections::HashMap;
+
+use chrono::{DateTime, Utc};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use tracing::debug;
@@ -53,6 +57,11 @@ pub enum RejectReason {
     /// Caps would force `contracts = 0` (e.g., total exposure already at
     /// the ceiling, or per-market cap is below the price of one contract).
     NoBudgetRemaining,
+    /// Same market emitted a signal less than `cooldown_secs` ago. Prevents
+    /// the bot thrashing on tiny price wiggles between passes — orderbook
+    /// shifts 1¢, model probability barely changes, the gate's threshold
+    /// flips, and without a cooldown the bot would re-emit endlessly.
+    InCooldown { since_secs: i64, cooldown_secs: u64 },
 }
 
 pub struct RiskManager {
@@ -62,6 +71,10 @@ pub struct RiskManager {
     pass_exposure_usd: Decimal,
     /// Running count of approved-or-adjusted signals *this pass*.
     pass_position_count: usize,
+    /// Last time the bot emitted a Signal for a given market ticker. Spans
+    /// strategy passes — `reset_for_pass` does NOT touch this. The cooldown
+    /// is what stops the bot thrashing on tiny inter-pass price wiggles.
+    last_signal_at: HashMap<String, DateTime<Utc>>,
 }
 
 impl RiskManager {
@@ -70,12 +83,16 @@ impl RiskManager {
             cfg,
             pass_exposure_usd: Decimal::ZERO,
             pass_position_count: 0,
+            last_signal_at: HashMap::new(),
         }
     }
 
     /// Drop the per-pass running tallies. Call at the start of each
     /// strategy pass — dry-run has no fill confirmations, so each pass
     /// starts fresh.
+    ///
+    /// Per-market cooldown state (`last_signal_at`) is intentionally
+    /// preserved: the cooldown is supposed to span passes.
     pub fn reset_for_pass(&mut self) {
         self.pass_exposure_usd = Decimal::ZERO;
         self.pass_position_count = 0;
@@ -91,7 +108,27 @@ impl RiskManager {
 
     /// Apply caps to a `Signal`. Returns the (possibly clipped) signal,
     /// or a reject. Mutates the running tallies on Approve/Adjusted.
+    /// Equivalent to `evaluate_at(signal, Utc::now())`.
     pub fn evaluate(&mut self, signal: Signal) -> RiskDecision {
+        self.evaluate_at(signal, Utc::now())
+    }
+
+    /// Same as `evaluate` but with an explicit clock. Test seam — production
+    /// code calls `evaluate`.
+    pub fn evaluate_at(&mut self, signal: Signal, now: DateTime<Utc>) -> RiskDecision {
+        // Per-market cooldown is the cheapest gate; check before exposure
+        // accounting so a thrashing market doesn't burn a slot in the
+        // concurrent-positions tally.
+        if let Some(last) = self.last_signal_at.get(&signal.market_ticker).copied() {
+            let since_secs = now.signed_duration_since(last).num_seconds();
+            if (0..self.cfg.per_market_cooldown_secs as i64).contains(&since_secs) {
+                return RiskDecision::Reject(RejectReason::InCooldown {
+                    since_secs,
+                    cooldown_secs: self.cfg.per_market_cooldown_secs,
+                });
+            }
+        }
+
         if self.pass_position_count >= self.cfg.max_concurrent_positions {
             return RiskDecision::Reject(RejectReason::ConcurrentPositionsCapped);
         }
@@ -135,6 +172,11 @@ impl RiskManager {
         let added_exposure = price * Decimal::from(contracts);
         self.pass_exposure_usd += added_exposure;
         self.pass_position_count += 1;
+        // Record after clipping — a 0-contract signal would have been
+        // rejected above, so `last_signal_at` only holds tickers that
+        // actually emitted live size.
+        self.last_signal_at
+            .insert(clipped.market_ticker.clone(), now);
         debug!(
             ticker = %clipped.market_ticker,
             contracts,
@@ -167,18 +209,34 @@ mod tests {
     use weather_types::Side;
 
     fn cfg(per_market: Decimal, total: Decimal, max_concurrent: usize) -> RiskConfig {
+        // Default helpers run with cooldown = 0 so every test that doesn't
+        // explicitly exercise the cooldown gate stays oblivious to it.
+        cfg_with_cooldown(per_market, total, max_concurrent, 0)
+    }
+
+    fn cfg_with_cooldown(
+        per_market: Decimal,
+        total: Decimal,
+        max_concurrent: usize,
+        cooldown_secs: u64,
+    ) -> RiskConfig {
         RiskConfig {
             max_position_size_usd: per_market,
             max_total_exposure_usd: total,
-            per_market_cooldown_secs: 60,
+            per_market_cooldown_secs: cooldown_secs,
             max_concurrent_positions: max_concurrent,
+            bankroll_usd: dec!(100),
         }
     }
 
     fn signal(price: Decimal, contracts: u32) -> Signal {
+        signal_for("KXHIGHNY-26JUL04-T75", price, contracts)
+    }
+
+    fn signal_for(ticker: &str, price: Decimal, contracts: u32) -> Signal {
         Signal {
             id: Uuid::nil(),
-            market_ticker: "KXHIGHNY-26JUL04-T75".into(),
+            market_ticker: ticker.into(),
             side: Side::Yes,
             limit_price: price,
             contracts,
@@ -302,5 +360,106 @@ mod tests {
     #[test]
     fn exposure_usd_helper_matches_internal_tally() {
         assert_eq!(exposure_usd(dec!(0.50), 7), dec!(3.5));
+    }
+
+    fn t(secs_ago: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now() - chrono::Duration::seconds(secs_ago)
+    }
+
+    #[test]
+    fn cooldown_zero_is_disabled() {
+        let mut rm = RiskManager::new(cfg_with_cooldown(dec!(100), dec!(100), 10, 0));
+        let now = chrono::Utc::now();
+        let _ = rm.evaluate_at(signal(dec!(0.50), 1), now);
+        // Same market, immediately. Cooldown=0 should NOT block.
+        match rm.evaluate_at(signal(dec!(0.50), 1), now) {
+            RiskDecision::Approve(_) | RiskDecision::Adjusted(_, _) => {}
+            other => panic!("expected approve/adjusted, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cooldown_blocks_repeat_signal_inside_window() {
+        let mut rm = RiskManager::new(cfg_with_cooldown(dec!(100), dec!(100), 10, 60));
+        let t0 = t(0);
+        let _ = rm.evaluate_at(signal(dec!(0.50), 1), t0);
+
+        let later = t0 + chrono::Duration::seconds(10);
+        match rm.evaluate_at(signal(dec!(0.50), 1), later) {
+            RiskDecision::Reject(RejectReason::InCooldown {
+                since_secs,
+                cooldown_secs,
+            }) => {
+                assert_eq!(since_secs, 10);
+                assert_eq!(cooldown_secs, 60);
+            }
+            other => panic!("expected InCooldown reject, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cooldown_clears_after_window_elapses() {
+        let mut rm = RiskManager::new(cfg_with_cooldown(dec!(100), dec!(100), 10, 60));
+        let t0 = t(0);
+        let _ = rm.evaluate_at(signal(dec!(0.50), 1), t0);
+
+        let later = t0 + chrono::Duration::seconds(120);
+        match rm.evaluate_at(signal(dec!(0.50), 1), later) {
+            RiskDecision::Approve(_) | RiskDecision::Adjusted(_, _) => {}
+            other => panic!("expected approve/adjusted post-cooldown, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cooldown_is_per_market_not_global() {
+        let mut rm = RiskManager::new(cfg_with_cooldown(dec!(100), dec!(100), 10, 60));
+        let now = chrono::Utc::now();
+        let _ = rm.evaluate_at(signal_for("MKT-A", dec!(0.50), 1), now);
+        // Different ticker, same time. No cooldown should fire.
+        match rm.evaluate_at(signal_for("MKT-B", dec!(0.50), 1), now) {
+            RiskDecision::Approve(_) | RiskDecision::Adjusted(_, _) => {}
+            other => panic!(
+                "expected approve/adjusted on different ticker, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn cooldown_persists_across_reset_for_pass() {
+        let mut rm = RiskManager::new(cfg_with_cooldown(dec!(100), dec!(100), 10, 60));
+        let t0 = t(0);
+        let _ = rm.evaluate_at(signal(dec!(0.50), 1), t0);
+        rm.reset_for_pass();
+        // Different pass, but inside the cooldown window — should still block.
+        let later = t0 + chrono::Duration::seconds(15);
+        assert!(matches!(
+            rm.evaluate_at(signal(dec!(0.50), 1), later),
+            RiskDecision::Reject(RejectReason::InCooldown { .. })
+        ));
+    }
+
+    #[test]
+    fn cooldown_does_not_consume_concurrent_positions_slot() {
+        // A market in cooldown should not eat into max_concurrent_positions
+        // — we want the next *fresh* market to still be admissible.
+        let mut rm = RiskManager::new(cfg_with_cooldown(dec!(100), dec!(100), 1, 60));
+        let t0 = t(0);
+        let _ = rm.evaluate_at(signal_for("MKT-A", dec!(0.50), 1), t0);
+        rm.reset_for_pass();
+        // A's cooldown is active.
+        let later = t0 + chrono::Duration::seconds(10);
+        assert!(matches!(
+            rm.evaluate_at(signal_for("MKT-A", dec!(0.50), 1), later),
+            RiskDecision::Reject(RejectReason::InCooldown { .. })
+        ));
+        // B should still go through — concurrent slot wasn't burned.
+        match rm.evaluate_at(signal_for("MKT-B", dec!(0.50), 1), later) {
+            RiskDecision::Approve(_) | RiskDecision::Adjusted(_, _) => {}
+            other => panic!(
+                "B should clear after A is rejected in-cooldown, got {:?}",
+                other
+            ),
+        }
     }
 }

@@ -4,8 +4,12 @@
 env = "demo"
 
 [execution]
-# Explicit opt-in. "live" requires KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY_PATH set
-# and KALSHI_ENV=prod. Default keeps you safe.
+# "dry_run" → log decisions only (no orders, no risk).
+# "paper"   → same code path as live, routed through paper-trade endpoint
+#             or local mock. Surfaces lifecycle bugs dry-run can't catch.
+# "live"    → real money. Requires KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY_PATH
+#             AND KALSHI_ENV=prod AND an explicit code-edit to the executor's
+#             never_send flag. Default keeps you safe.
 mode = "dry_run"
 
 [forecast]
@@ -67,8 +71,29 @@ max_price = "0.92"
 # Kalshi liquidity is thin. Bump after a few weeks of profitable paper-trading.
 max_position_size_usd = "5.0"
 max_total_exposure_usd = "50.0"
+# Per-market cooldown after we emit a trade signal. 60s prevents the
+# bot thrashing on tiny price wiggles between passes (orderbook moves
+# 1¢, model probability barely changes, bot would otherwise re-fire).
 per_market_cooldown_secs = 60
 max_concurrent_positions = 10
+# Notional bankroll the strategy's Kelly fraction sizes against.
+# Sized small to match the per-pass cap; bump once paper-trading is clean.
+bankroll_usd = "100.0"
+
+[kill_switch]
+# Dynamic operator halt — distinct from the executor's static
+# `never_send=true` development guard (which requires a code edit). All
+# checks fire once at the top of each strategy pass.
+enabled = true
+# File whose existence (regardless of content) halts new orders.
+# Relative to CWD by design — operator-facing, not deploy-baked.
+kill_file_path = "./KILL"
+# Env var name; non-empty value other than "0"/"false" halts new orders.
+kill_env_var = "WEATHER_BOT_KILL"
+# Cumulative realised loss (USD) within 24h that flips the soft kill.
+# 0 disables — dry-run has no realised P&L, so this is a no-op until
+# paper/live trading lands and the bot has a fill ledger to evaluate.
+max_drawdown_24h_usd = "0"
 
 [monitor]
 poll_interval_ms = 5000

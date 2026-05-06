@@ -362,3 +362,113 @@ The first live dry-run surfaced two operational issues quickly:
   `cargo test --workspace --locked`.
 - Current replay is good for operational sanity and resolved calibration once
   CLI reports are available. It is not yet a fill-aware P&L backtester.
+
+---
+
+## 2026-05-05 — Safety stack: kill switch + cooldown + bankroll Kelly + paper mode + freshness
+
+Roadmap shifts from "build the substrate" to "make it safe to actually
+trade." This session lands every safety prerequisite that needed to clear
+*before* the executor can be wired into the strategy loop, plus a few
+cleanup items that pair naturally.
+
+### Safety stack landed
+
+- **Dynamic kill switch** (`weather-bot::kill_switch`). Three operator
+  gates, each failing in a different way:
+  - File flag (`./KILL`) — drop a file on disk, halts on next pass.
+  - Env var (`WEATHER_BOT_KILL`) — non-empty / not `0`/`false` halts.
+  - 24h-realised-loss soft kill — disabled by default until a fill ledger
+    exists; activates when paper / live trading lands.
+  Distinct from the executor's static `never_send=true` (which requires a
+  code edit). A `KillReason::tag()` shows which gate fired in the per-pass
+  log. SIGTERM is also handled in `wait_for_shutdown_signal` alongside
+  SIGINT, so `systemctl stop` cleanly exits.
+- **`Paper` execution mode.** `ExecutionMode` is now three-valued
+  (`DryRun`, `Paper`, `Live`); `as_str()`/`Display` give stable
+  lowercase tags (`dry_run`, `paper`, `live`). Every JSONL decision row
+  carries `mode`, and the bot's startup line stamps the same value so
+  replay can split metrics on it.
+- **Per-market cooldown** (`weather-risk`). Tracks
+  `last_signal_at: HashMap<String, DateTime<Utc>>` across passes
+  (`reset_for_pass` does not clear it), rejects with
+  `RejectReason::InCooldown { since_secs, cooldown_secs }`, and crucially
+  does *not* burn a `max_concurrent_positions` slot — a market in
+  cooldown shouldn't crowd out fresh markets. Test seam:
+  `evaluate_at(signal, now)`.
+- **Bankroll-fraction Kelly** (`weather-strategy`). `decide()` now takes
+  `bankroll_usd: Decimal`; the formula is
+  `f* = raw_edge / (1 − price)`,
+  `contracts = floor(bankroll · kelly_fraction · f* / price)`, and
+  the risk manager still clamps for the per-market and per-pass caps.
+  Closes the previous "Kelly against an implicit $1, the cap does all
+  the sizing" hole. Bankroll lives in `RiskConfig.bankroll_usd`.
+
+### Operability and quality
+
+- **`--once` CLI flag.** Single strategy pass then exits — useful for
+  cron, smoke tests, and CI without holding the bot open.
+- **Source health checks** (`weather-bot::source_health`). Classifier
+  returns `Fresh` / `NeedsRefresh` / `Stale` based on cache age vs
+  configured refresh interval × `SOURCE_STALENESS_MULTIPLIER` (=2). When
+  NWS is stale and a refresh just failed, the market is skipped with a
+  loud `source_stale: …` warning and a `nws_source_stale` counter; GEFS
+  staleness falls back to the static σ table (still safe) and bumps
+  `gefs_source_stale`. Counters surface in the per-pass summary line.
+- **Risk reject reasons in per-pass summary.** `apply_risk` now returns
+  `Option<RejectReason>`; the summary tallies
+  `risk_in_cooldown` / `risk_concurrent_capped` / `risk_no_budget`.
+- **`OrderbookQuote` unified into `weather-types`.** Was duplicated in
+  `weather-strategy`; now one home, re-exported.
+- **Pricing doc-tests.** Three: `price_market` (μ=T → P≈0.5),
+  `normal_cdf` (Φ(0)=0.5, ±1σ ≈ 0.8413, symmetric), `sigma_for_horizon`
+  (monotone, capped at 6.0).
+- **`f64`-money audit** (`docs/research/f64-money-audit.md`). Spot-check
+  confirmed money paths are end-to-end `Decimal`. The single
+  `f64 → Decimal` boundary is `Decimal::from_f64(yes_p)` in pricing.
+
+### Research artifacts
+
+Four reports under `docs/research/`:
+
+- **`kalshi-historical-candles.md`** — confirmed
+  `GET /trade-api/v2/historical/markets/{ticker}/candlesticks` exists.
+  Routing gated by `/historical/cutoff`; live route handles ~3 months,
+  historical handles older. Same OHLC + bid/ask + volume shape as the
+  live `/series/.../candlesticks` we already use. No first-party bulk
+  dump (no S3, no Kaggle, no HF). Recommended approach: chunked queries
+  on both routes.
+- **`metar-observations.md`** — verified all 5 city ICAOs publish METAR;
+  Kalshi's CLI station == NWS observation station for every one
+  (KNYC, KMDW, KLAX, KMIA, KAUS). Endpoint:
+  `https://api.weather.gov/stations/{ICAO}/observations[/latest]`.
+  Units are SI (°C, km/h, Pa) — explicit conversion at the boundary.
+  `maxTemperatureLast24Hours` is null in practice; we have to derive
+  the running daily max from hourly observations ourselves. Latency
+  floor ~10 min, edge cache `s-maxage=300`. IEM `currents.json`
+  recommended as a fallback (returns pre-computed `max_tmpf`/`min_tmpf`
+  in °F, keyed to civil date).
+- **`paper-trade-mode.md`** — paper-mode design doc. Two options:
+  Kalshi-hosted demo vs local mock. Demo writability and fill
+  simulation are not documented; recommendation is an empirical probe
+  before committing.
+- **`ecmwf-open-meteo.md`** — `models=ecmwf_ifs025`. **51 members**
+  (50 perturbed + 1 control on bare `temperature_2m`). Response shape
+  identical to GEFS — our existing `gefs.rs` parser handles up to 99
+  members already, so it parses ECMWF unchanged. Recommendation: add
+  `fetch_ecmwf_ifs025` next to `fetch_gfs05` on the same client; defer
+  the `GefsClient` rename to a separate PR. Blender: pool both
+  ensembles' per-member daily extremes into one combined sample,
+  recompute μ/σ over the union (option A); log defensive max-σ
+  side-by-side (option B) for replay-driven comparison.
+
+### State after this session
+
+- 11-crate workspace; **170 unit + 3 doc-tests passing**, 5 ignored
+  (live-network).
+- `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace --locked` all clean.
+- Every safety prerequisite for items 6–8 of the near-term list is now
+  in place. Wiring the executor into the strategy loop now needs only
+  the paper-mode adapter (whose design doc is in research) and a
+  decision on the demo-vs-mock empirical probe.

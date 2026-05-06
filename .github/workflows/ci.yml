@@ -34,5 +34,33 @@ jobs:
       - name: cargo build --workspace --locked
         run: cargo build --workspace --locked
 
+      # `cargo test --workspace` runs the regression test at
+      # crates/weather-backtest/tests/regression.rs, which asserts golden
+      # calibration metrics on a fixed synthetic fixture. A drift here
+      # *blocks* the PR; intentional roll-forward updates the goldens in
+      # the test file and re-runs.
       - name: cargo test --workspace --locked
         run: cargo test --workspace --locked
+
+  # Compiles the criterion benchmarks to catch API breaks early. We don't
+  # *run* the bench in CI — GitHub-hosted runners are too noisy to assert
+  # on absolute timings, and a benchmark that "fails" because the runner
+  # was loaded is just CI flake. Run locally on a quiet machine to spot
+  # regressions in pricing-hot-path latency.
+  bench-compile:
+    name: bench compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Bench profile uses release, so it gets its own cache slot.
+          shared-key: bench
+
+      - name: cargo bench --workspace --no-run --locked
+        run: cargo bench --workspace --no-run --locked

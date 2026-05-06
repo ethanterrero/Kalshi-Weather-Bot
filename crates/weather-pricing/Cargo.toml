@@ -7,3 +7,12 @@ edition = "2021"
 weather-types = { path = "../weather-types" }
 chrono = { workspace = true }
 rust_decimal = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+# `harness = false` swaps libtest for criterion's own runner, which is
+# required for criterion's macro-generated benchmark groups to work.
+[[bench]]
+name = "pricing_hot_path"
+harness = false

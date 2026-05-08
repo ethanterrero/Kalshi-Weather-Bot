@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ethanterrero.weather-bot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
+        <string>/Users/ethanterrero/Desktop/Kalshi-Weather-Bot/target/release/weather-bot</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/ethanterrero/Desktop/Kalshi-Weather-Bot</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/ethanterrero/Desktop/Kalshi-Weather-Bot/logs/weather-bot.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/ethanterrero/Desktop/Kalshi-Weather-Bot/logs/weather-bot.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

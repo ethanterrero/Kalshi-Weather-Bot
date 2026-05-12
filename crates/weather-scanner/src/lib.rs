@@ -63,6 +63,57 @@ impl KalshiClient {
         self.get_with_retry(url).await
     }
 
+    /// Fetch settled markets for `series_ticker`, paginating until we either
+    /// run out of newer markets or cross `lookback_days` worth of `close_time`s.
+    /// Kalshi's `?status=settled` returns markets newest-first, so once a
+    /// page is entirely older than the cutoff we stop.
+    ///
+    /// Note: the field on the wire is `"status":"finalized"` (not "settled");
+    /// `?status=settled` is the query param, the value in the response is
+    /// `finalized`. Both `result` and `settlement_value_dollars` populate on
+    /// the response. We only consume `result` here — the dollar value is
+    /// the payout, not the temperature.
+    pub async fn list_settled_markets_in_series(
+        &self,
+        series_ticker: &str,
+        lookback_days: i64,
+    ) -> Result<Vec<RawMarket>, ScannerError> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(lookback_days);
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        // Safety cap: even at limit=200 we shouldn't need more than ~5 pages
+        // for a 60-day lookback on one series.
+        const MAX_PAGES: usize = 20;
+        for _ in 0..MAX_PAGES {
+            let mut url = format!(
+                "{}/markets?series_ticker={}&status=settled&limit=200",
+                self.base_url, series_ticker
+            );
+            if let Some(c) = &cursor {
+                url.push_str("&cursor=");
+                url.push_str(c);
+            }
+            let bytes = self.get_with_retry(&url).await?;
+            let page: MarketsResponse = serde_json::from_slice(&bytes)?;
+            if page.markets.is_empty() {
+                break;
+            }
+            // Page sorted newest-first by close_time; stop once the oldest is
+            // past the cutoff.
+            let oldest_on_page = page.markets.iter().map(|m| m.close_time).min();
+            for m in page.markets {
+                if m.close_time >= cutoff {
+                    out.push(m);
+                }
+            }
+            match (page.cursor, oldest_on_page) {
+                (Some(c), Some(oldest)) if !c.is_empty() && oldest >= cutoff => cursor = Some(c),
+                _ => break,
+            }
+        }
+        Ok(out)
+    }
+
     /// Fetch all open markets for `series_ticker`, auto-paginating through
     /// the cursor field until Kalshi returns an empty cursor.
     pub async fn list_open_markets_in_series(
@@ -283,6 +334,11 @@ pub struct RawMarket {
     pub status: String,
     pub strike_type: String,
 
+    /// Settlement outcome for finalized markets: `"yes"` or `"no"`. Absent
+    /// (`None`) for open / active markets.
+    #[serde(default)]
+    pub result: Option<String>,
+
     #[serde(default, with = "rust_decimal::serde::str_option")]
     pub yes_ask_dollars: Option<Decimal>,
     #[serde(default, with = "rust_decimal::serde::str_option")]
@@ -452,6 +508,60 @@ mod tests {
         // KXEPLGAME etc. shouldn't parse as weather even though the layout
         // is similar.
         assert!(parse_weather_threshold("KXEPLGAME-26MAY02-T1", "greater").is_none());
+    }
+
+    /// Trimmed real demo-api response captured 2026-05-12 for
+    /// `?series_ticker=KXHIGHNY&status=settled`. The `status` field in the
+    /// JSON is `"finalized"` (not "settled"), and `result` is `"yes"` /
+    /// `"no"`. Both fields plus `strike_type` are what reconciliation
+    /// consumes.
+    const FIXTURE_SETTLED: &str = r#"{
+      "cursor": "",
+      "markets": [
+        {
+          "ticker": "KXHIGHNY-26MAY10-T79",
+          "event_ticker": "KXHIGHNY-26MAY10",
+          "title": "Will the high temp in NYC be >79 on May 10, 2026?",
+          "yes_sub_title": "80° or above",
+          "close_time": "2026-05-11T04:59:00Z",
+          "status": "finalized",
+          "strike_type": "greater",
+          "result": "no",
+          "yes_ask_dollars": "0.0000",
+          "yes_bid_dollars": "0.0000",
+          "last_price_dollars": "0.0000"
+        },
+        {
+          "ticker": "KXHIGHNY-26MAY10-T64",
+          "event_ticker": "KXHIGHNY-26MAY10",
+          "title": "Will the high temp in NYC be >64 on May 10, 2026?",
+          "yes_sub_title": "65° or above",
+          "close_time": "2026-05-11T04:59:00Z",
+          "status": "finalized",
+          "strike_type": "greater",
+          "result": "yes",
+          "yes_ask_dollars": "1.0000",
+          "yes_bid_dollars": "1.0000",
+          "last_price_dollars": "1.0000"
+        }
+      ]
+    }"#;
+
+    #[test]
+    fn deserializes_settled_markets_with_result_field() {
+        let parsed: MarketsResponse = serde_json::from_str(FIXTURE_SETTLED).unwrap();
+        assert_eq!(parsed.markets.len(), 2);
+        assert_eq!(parsed.markets[0].status, "finalized");
+        assert_eq!(parsed.markets[0].result.as_deref(), Some("no"));
+        assert_eq!(parsed.markets[1].result.as_deref(), Some("yes"));
+    }
+
+    #[test]
+    fn open_market_fixture_still_parses_without_result_field() {
+        // Live `?status=open` responses don't include `result`. The serde
+        // default keeps `RawMarket` deserialising the legacy shape cleanly.
+        let parsed: MarketsResponse = serde_json::from_str(FIXTURE_MARKETS).unwrap();
+        assert!(parsed.markets.iter().all(|m| m.result.is_none()));
     }
 
     /// Live integration smoke test against demo-api.kalshi.co. Marked

@@ -249,6 +249,40 @@ pub fn metrics(joined: &[JoinedDecision]) -> Metrics {
     }
 }
 
+/// Reduce joined decisions to one per `(ticker, resolution_date)`, keeping
+/// the earliest emission. Calibration aggregated over raw JSONL rows is
+/// dominated by repeated dry-run emissions of the same market (one
+/// opportunity emitted every pass for hours = thousands of rows that all
+/// resolve identically). Dedupe before bucketing to make the histogram
+/// meaningful as model evidence.
+///
+/// "Earliest emission" depends on input order. `read_decisions` returns
+/// rows in file order; callers that want strict temporal order should
+/// sort by `row.ts` before calling.
+pub fn dedupe_joined_by_opportunity(joined: &[JoinedDecision]) -> Vec<JoinedDecision> {
+    let mut first_by_key: BTreeMap<(String, NaiveDate), JoinedDecision> = BTreeMap::new();
+    for j in joined {
+        let key = (j.row.ticker.clone(), j.row.resolution_date);
+        first_by_key.entry(key).or_insert_with(|| j.clone());
+    }
+    let mut out: Vec<JoinedDecision> = first_by_key.into_values().collect();
+    out.sort_by_key(|j| j.row.ts);
+    out
+}
+
+/// Filter joined decisions to only those the bot would actually act on
+/// (`decision == "trade"`). Headline metrics over the whole priced
+/// universe are dominated by far-tail no-trade rows where the model
+/// correctly prices near 0 or 1; this restricts evaluation to the subset
+/// where edge actually matters.
+pub fn filter_joined_to_trades(joined: &[JoinedDecision]) -> Vec<JoinedDecision> {
+    joined
+        .iter()
+        .filter(|j| is_trade_row(&j.row))
+        .cloned()
+        .collect()
+}
+
 /// Metrics grouped by the JSONL `sigma_source` tag. This is the cheap,
 /// direct answer to "did GEFS σ help?" once the dry-run has accumulated
 /// enough rows.
@@ -723,6 +757,88 @@ mod tests {
         assert_eq!(pnl.mark_price, dec!(0.48));
         assert_eq!(pnl.net_per_contract, dec!(0.02));
         assert_eq!(pnl.net_total, dec!(0.10));
+    }
+
+    #[test]
+    fn dedupe_joined_by_opportunity_keeps_earliest_per_ticker_and_date() {
+        let date = NaiveDate::from_ymd_opt(2026, 7, 4).unwrap();
+        let base = row(
+            TempStat::DailyHigh,
+            ThresholdDirection::AtOrAbove,
+            75,
+            date,
+            dec!(0.65),
+            78,
+        );
+
+        let mk = |ts_offset_secs: i64, ticker: &str, p: Decimal| {
+            let mut r = base.clone();
+            r.ts = base.ts + chrono::Duration::seconds(ts_offset_secs);
+            r.ticker = ticker.to_string();
+            r.model_p_yes = p;
+            JoinedDecision {
+                row: r,
+                realised_temp_f: 80,
+                realised_yes: true,
+            }
+        };
+
+        let early_a = mk(0, "KXHIGHNY-26JUL04-T75", dec!(0.65));
+        let later_a = mk(60, "KXHIGHNY-26JUL04-T75", dec!(0.70));
+        let early_b = mk(30, "KXHIGHNY-26JUL04-T80", dec!(0.20));
+
+        let deduped = dedupe_joined_by_opportunity(&[early_a, later_a, early_b]);
+        assert_eq!(deduped.len(), 2);
+        // First emission wins: A's preserved model_p is 0.65, not 0.70.
+        let a = deduped
+            .iter()
+            .find(|j| j.row.ticker == "KXHIGHNY-26JUL04-T75")
+            .unwrap();
+        assert_eq!(a.row.model_p_yes, dec!(0.65));
+    }
+
+    #[test]
+    fn dedupe_joined_by_opportunity_separates_by_resolution_date() {
+        let mk = |date: NaiveDate| JoinedDecision {
+            row: row(
+                TempStat::DailyHigh,
+                ThresholdDirection::AtOrAbove,
+                75,
+                date,
+                dec!(0.65),
+                78,
+            ),
+            realised_temp_f: 80,
+            realised_yes: true,
+        };
+        let d1 = NaiveDate::from_ymd_opt(2026, 7, 4).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2026, 7, 5).unwrap();
+        let deduped = dedupe_joined_by_opportunity(&[mk(d1), mk(d2)]);
+        assert_eq!(deduped.len(), 2);
+    }
+
+    #[test]
+    fn filter_joined_to_trades_drops_no_trade_rows() {
+        let date = NaiveDate::from_ymd_opt(2026, 7, 4).unwrap();
+        let mut trade_row = JoinedDecision {
+            row: row(
+                TempStat::DailyHigh,
+                ThresholdDirection::AtOrAbove,
+                75,
+                date,
+                dec!(0.65),
+                78,
+            ),
+            realised_temp_f: 80,
+            realised_yes: true,
+        };
+        trade_row.row.decision = "trade".to_string();
+        let mut no_trade_row = trade_row.clone();
+        no_trade_row.row.decision = "no_trade".to_string();
+
+        let filtered = filter_joined_to_trades(&[trade_row, no_trade_row]);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].row.decision, "trade");
     }
 
     #[test]

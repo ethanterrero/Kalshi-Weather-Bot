@@ -14,9 +14,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use weather_backtest::{
-    candle_containing_ts, estimate_trade_pnl, is_trade_row, join_outcome, metrics_by_sigma_source,
-    read_decisions, series_ticker_from_market_ticker, summarize_pnl, summarize_pnl_by_sigma_source,
-    DecisionRow, JoinedDecision, PnlEstimate,
+    candle_containing_ts, dedupe_joined_by_opportunity, estimate_trade_pnl,
+    filter_joined_to_trades, is_trade_row, join_outcome, metrics_by_sigma_source, read_decisions,
+    series_ticker_from_market_ticker, summarize_pnl, summarize_pnl_by_sigma_source, DecisionRow,
+    JoinedDecision, PnlEstimate,
 };
 use weather_forecast::IemCliClient;
 use weather_scanner::{KalshiClient, PeriodInterval};
@@ -42,6 +43,20 @@ struct Args {
     /// Candle interval used for mark-to-market.
     #[arg(long, value_enum, default_value_t = ReplayPeriod::Hour)]
     period: ReplayPeriod,
+    /// Restrict outcome metrics to rows where `decision == "trade"`. The
+    /// default view spans the whole priced universe and is dominated by
+    /// far-tail no-trade rows where the model correctly prices near 0 or
+    /// 1; this flag scopes the histogram to the subset where edge
+    /// matters. The candle mark section is unaffected (it already only
+    /// covers trade rows).
+    #[arg(long)]
+    trades_only: bool,
+    /// Collapse repeated dry-run emissions to one per
+    /// `(ticker, resolution_date)` before computing outcome metrics.
+    /// Without this, calibration buckets are dominated by markets the
+    /// bot re-emits every pass for hours. Earliest emission wins.
+    #[arg(long)]
+    by_opportunity: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -99,10 +114,20 @@ async fn main() -> Result<()> {
         println!();
         println!("=== Outcome metrics by sigma_source ===");
         println!("joined {} rows with realised CLI outcomes", joined.len());
-        if joined.is_empty() {
+
+        let filters_applied = describe_outcome_filters(args.trades_only, args.by_opportunity);
+        let scoped = apply_outcome_filters(&joined, args.trades_only, args.by_opportunity);
+        if let Some(desc) = filters_applied {
+            println!(
+                "  after filters ({desc}): {} rows / opportunities",
+                scoped.len()
+            );
+        }
+
+        if scoped.is_empty() {
             println!("  no resolved rows yet; rerun after CLI reports publish");
         } else {
-            for (source, m) in metrics_by_sigma_source(&joined) {
+            for (source, m) in metrics_by_sigma_source(&scoped) {
                 print_metrics_line(&source, &m);
             }
         }
@@ -125,6 +150,37 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn apply_outcome_filters(
+    joined: &[JoinedDecision],
+    trades_only: bool,
+    by_opportunity: bool,
+) -> Vec<JoinedDecision> {
+    let mut out = if trades_only {
+        filter_joined_to_trades(joined)
+    } else {
+        joined.to_vec()
+    };
+    if by_opportunity {
+        out = dedupe_joined_by_opportunity(&out);
+    }
+    out
+}
+
+fn describe_outcome_filters(trades_only: bool, by_opportunity: bool) -> Option<String> {
+    let mut parts = Vec::new();
+    if trades_only {
+        parts.push("--trades-only");
+    }
+    if by_opportunity {
+        parts.push("--by-opportunity");
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
 }
 
 fn expand_decision_paths(inputs: &[PathBuf]) -> Result<Vec<PathBuf>> {
@@ -372,6 +428,71 @@ mod tests {
         let different_price = decision_row("KXHIGHNY-26MAY04-T70", "yes", "0.46", 10);
         let deduped = dedupe_trade_rows(&[row, later_same, different_price]);
         assert_eq!(deduped.len(), 2);
+    }
+
+    #[test]
+    fn describe_outcome_filters_lists_active_flags() {
+        assert_eq!(describe_outcome_filters(false, false), None);
+        assert_eq!(
+            describe_outcome_filters(true, false).as_deref(),
+            Some("--trades-only")
+        );
+        assert_eq!(
+            describe_outcome_filters(false, true).as_deref(),
+            Some("--by-opportunity")
+        );
+        assert_eq!(
+            describe_outcome_filters(true, true).as_deref(),
+            Some("--trades-only, --by-opportunity")
+        );
+    }
+
+    #[test]
+    fn apply_outcome_filters_composes_trades_only_and_dedup() {
+        let date = NaiveDate::from_ymd_opt(2026, 5, 4).unwrap();
+        let mk = |ticker: &str, decision: &str, ts_offset: i64| {
+            let mut r = decision_row(ticker, "yes", "0.45", 10);
+            r.decision = decision.to_string();
+            r.resolution_date = date;
+            r.ts += Duration::seconds(ts_offset);
+            JoinedDecision {
+                row: r,
+                realised_temp_f: 80,
+                realised_yes: true,
+            }
+        };
+        let trade_early = mk("KXHIGHNY-26MAY04-T70", "trade", 0);
+        let trade_late = mk("KXHIGHNY-26MAY04-T70", "trade", 60);
+        let no_trade = mk("KXHIGHNY-26MAY04-T71", "no_trade", 0);
+
+        // No flags: every row passes through.
+        let none = apply_outcome_filters(
+            &[trade_early.clone(), trade_late.clone(), no_trade.clone()],
+            false,
+            false,
+        );
+        assert_eq!(none.len(), 3);
+
+        // trades_only: no_trade dropped.
+        let trades = apply_outcome_filters(
+            &[trade_early.clone(), trade_late.clone(), no_trade.clone()],
+            true,
+            false,
+        );
+        assert_eq!(trades.len(), 2);
+
+        // by_opportunity: same (ticker, date) collapsed.
+        let opps = apply_outcome_filters(
+            &[trade_early.clone(), trade_late.clone(), no_trade.clone()],
+            false,
+            true,
+        );
+        assert_eq!(opps.len(), 2);
+
+        // Combined: collapse to one trade opportunity.
+        let combined = apply_outcome_filters(&[trade_early, trade_late, no_trade], true, true);
+        assert_eq!(combined.len(), 1);
+        assert_eq!(combined[0].row.decision, "trade");
     }
 
     #[test]

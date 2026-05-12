@@ -11,6 +11,10 @@ path = "src/bin/calibrate.rs"
 name = "replay"
 path = "src/bin/replay.rs"
 
+[[bin]]
+name = "reconcile"
+path = "src/bin/reconcile.rs"
+
 [dependencies]
 weather-forecast = { path = "../weather-forecast" }
 weather-pricing = { path = "../weather-pricing" }

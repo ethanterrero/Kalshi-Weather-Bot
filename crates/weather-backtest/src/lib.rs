@@ -19,8 +19,12 @@
 //! we don't need it yet).
 
 pub mod historical;
+pub mod reconcile;
 
 pub use historical::{historical_calibration, model_p_yes, CalibrationPlan};
+pub use reconcile::{
+    reconcile_settled_market, KalshiOutcome, ReconcileOutcome, ReconcileResult, SkipReason,
+};
 
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::prelude::ToPrimitive;

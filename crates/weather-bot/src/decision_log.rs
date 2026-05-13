@@ -65,17 +65,28 @@ pub struct DecisionRecord {
     pub raw_edge: Option<Decimal>,
     pub net_ev_per_contract: Option<Decimal>,
     pub market_p_implied: Option<Decimal>,
+    /// Risk-layer disposition for Trade rows:
+    /// `approved`, `adjusted_*`, `rejected_*`, or `None` when risk was not
+    /// evaluated (e.g. no-trade strategy decision).
+    pub risk_outcome: Option<String>,
+    /// Execution-layer disposition for Trade rows:
+    /// `dry_run_suppressed`, `paper_submitted`, `paper_suppressed_*`,
+    /// `paper_error`, `suppressed_duplicate_intended`, etc.
+    pub execution_outcome: Option<String>,
 }
 
 /// Build a `DecisionRecord` from the inputs available at the strategy-loop
 /// callsite. The `now` arg is wired in for tests; production callers pass
 /// `Utc::now()`.
+#[allow(clippy::too_many_arguments)]
 pub fn record_from(
     market: &KalshiMarket,
     threshold: &WeatherThreshold,
     pricing: &ModelPricing,
     decision: &Decision,
     mode: ExecutionMode,
+    risk_outcome: Option<&str>,
+    execution_outcome: Option<&str>,
     now: DateTime<Utc>,
 ) -> DecisionRecord {
     let yes_bid = market.yes_bid;
@@ -112,6 +123,8 @@ pub fn record_from(
         raw_edge: None,
         net_ev_per_contract: None,
         market_p_implied: None,
+        risk_outcome: None,
+        execution_outcome: None,
     };
 
     match decision {
@@ -124,6 +137,8 @@ pub fn record_from(
             rec.raw_edge = Some(ev.raw_edge);
             rec.net_ev_per_contract = Some(ev.net_ev_per_contract);
             rec.market_p_implied = Some(ev.market_implied_probability);
+            rec.risk_outcome = risk_outcome.map(str::to_string);
+            rec.execution_outcome = execution_outcome.map(str::to_string);
         }
         Decision::NoTrade(reason) => {
             rec.decision = "no_trade".into();
@@ -279,7 +294,16 @@ mod tests {
         let m = market(Some(dec!(0.45)), Some(dec!(0.50)));
         let p = pricing();
         let d = trade_decision();
-        let r = record_from(&m, &ny_high_75(), &p, &d, ExecutionMode::DryRun, ts());
+        let r = record_from(
+            &m,
+            &ny_high_75(),
+            &p,
+            &d,
+            ExecutionMode::DryRun,
+            None,
+            None,
+            ts(),
+        );
 
         assert_eq!(r.decision, "trade");
         assert!(r.reason.is_none());
@@ -294,6 +318,8 @@ mod tests {
         assert_eq!(r.city, "NY");
         assert_eq!(r.settlement_station, "KNYC");
         assert_eq!(r.model_p_yes, dec!(0.65));
+        assert_eq!(r.risk_outcome, None);
+        assert_eq!(r.execution_outcome, None);
     }
 
     #[test]
@@ -301,7 +327,16 @@ mod tests {
         let m = market(None, None);
         let p = pricing();
         let d = Decision::NoTrade(NoTradeReason::NoOrderbook);
-        let r = record_from(&m, &ny_high_75(), &p, &d, ExecutionMode::DryRun, ts());
+        let r = record_from(
+            &m,
+            &ny_high_75(),
+            &p,
+            &d,
+            ExecutionMode::DryRun,
+            None,
+            None,
+            ts(),
+        );
 
         assert_eq!(r.decision, "no_trade");
         assert_eq!(r.reason.as_deref(), Some("no_orderbook"));
@@ -312,6 +347,8 @@ mod tests {
         assert!(r.limit_price.is_none());
         assert!(r.raw_edge.is_none());
         assert!(r.net_ev_per_contract.is_none());
+        assert!(r.risk_outcome.is_none());
+        assert!(r.execution_outcome.is_none());
     }
 
     #[test]
@@ -322,7 +359,16 @@ mod tests {
             spread: dec!(0.40),
             max: dec!(0.10),
         });
-        let r = record_from(&m, &ny_high_75(), &p, &d, ExecutionMode::DryRun, ts());
+        let r = record_from(
+            &m,
+            &ny_high_75(),
+            &p,
+            &d,
+            ExecutionMode::DryRun,
+            None,
+            None,
+            ts(),
+        );
 
         assert_eq!(r.reason.as_deref(), Some("spread_too_wide"));
         assert_eq!(r.spread, Some(dec!(0.40)));
@@ -338,7 +384,16 @@ mod tests {
             raw_edge: dec!(0.01),
             min: dec!(0.05),
         });
-        let r = record_from(&m, &ny_high_75(), &p, &d, ExecutionMode::DryRun, ts());
+        let r = record_from(
+            &m,
+            &ny_high_75(),
+            &p,
+            &d,
+            ExecutionMode::DryRun,
+            None,
+            None,
+            ts(),
+        );
 
         assert_eq!(r.reason.as_deref(), Some("edge_below_min"));
         assert_eq!(r.raw_edge, Some(dec!(0.01)));
@@ -353,7 +408,16 @@ mod tests {
             net_ev: dec!(0.003),
             required: dec!(0.20),
         });
-        let r = record_from(&m, &ny_high_75(), &p, &d, ExecutionMode::DryRun, ts());
+        let r = record_from(
+            &m,
+            &ny_high_75(),
+            &p,
+            &d,
+            ExecutionMode::DryRun,
+            None,
+            None,
+            ts(),
+        );
 
         assert_eq!(r.reason.as_deref(), Some("ev_below_gate"));
         assert_eq!(r.net_ev_per_contract, Some(dec!(0.003)));
@@ -376,6 +440,8 @@ mod tests {
             &pricing(),
             &trade_decision(),
             ExecutionMode::DryRun,
+            Some("approved"),
+            Some("dry_run_suppressed"),
             ts(),
         );
 
@@ -394,6 +460,8 @@ mod tests {
         assert_eq!(parsed["model_p_yes"], "0.65");
         assert_eq!(parsed["settlement_station"], "KNYC");
         assert_eq!(parsed["mode"], "dry_run");
+        assert_eq!(parsed["risk_outcome"], "approved");
+        assert_eq!(parsed["execution_outcome"], "dry_run_suppressed");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -404,13 +472,41 @@ mod tests {
         let p = pricing();
         let d = trade_decision();
 
-        let dry = record_from(&m, &ny_high_75(), &p, &d, ExecutionMode::DryRun, ts());
-        let paper = record_from(&m, &ny_high_75(), &p, &d, ExecutionMode::Paper, ts());
-        let live = record_from(&m, &ny_high_75(), &p, &d, ExecutionMode::Live, ts());
+        let dry = record_from(
+            &m,
+            &ny_high_75(),
+            &p,
+            &d,
+            ExecutionMode::DryRun,
+            None,
+            None,
+            ts(),
+        );
+        let paper = record_from(
+            &m,
+            &ny_high_75(),
+            &p,
+            &d,
+            ExecutionMode::Paper,
+            Some("approved"),
+            Some("paper_submitted"),
+            ts(),
+        );
+        let live = record_from(
+            &m,
+            &ny_high_75(),
+            &p,
+            &d,
+            ExecutionMode::Live,
+            None,
+            None,
+            ts(),
+        );
 
         assert_eq!(dry.mode, "dry_run");
         assert_eq!(paper.mode, "paper");
         assert_eq!(live.mode, "live");
+        assert_eq!(paper.execution_outcome.as_deref(), Some("paper_submitted"));
     }
 
     #[tokio::test]
@@ -423,6 +519,8 @@ mod tests {
             &pricing(),
             &Decision::NoTrade(NoTradeReason::NoOrderbook),
             ExecutionMode::DryRun,
+            None,
+            None,
             ts(),
         );
         logger
@@ -446,6 +544,8 @@ mod tests {
             &pricing(),
             &trade_decision(),
             ExecutionMode::DryRun,
+            Some("approved"),
+            Some("dry_run_suppressed"),
             ts(),
         );
         logger.record(&r).await.unwrap();

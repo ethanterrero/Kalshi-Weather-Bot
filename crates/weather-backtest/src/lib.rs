@@ -79,6 +79,16 @@ pub struct DecisionRow {
     pub raw_edge: Option<Decimal>,
     pub net_ev_per_contract: Option<Decimal>,
     pub market_p_implied: Option<Decimal>,
+    /// Optional risk disposition tag from the strategy loop (`approved`,
+    /// `adjusted_*`, `rejected_*`). Newer JSONL rows include this; older
+    /// logs omit it.
+    #[serde(default)]
+    pub risk_outcome: Option<String>,
+    /// Optional execution disposition tag from the strategy loop
+    /// (`dry_run_suppressed`, `paper_submitted`, etc.). Used to separate
+    /// strategy intent from actual execution attempts in replay diagnostics.
+    #[serde(default)]
+    pub execution_outcome: Option<String>,
 }
 
 /// Read a single JSONL file into a `Vec<DecisionRow>`. Each line is a
@@ -495,6 +505,8 @@ mod tests {
             raw_edge: None,
             net_ev_per_contract: None,
             market_p_implied: None,
+            risk_outcome: None,
+            execution_outcome: None,
         }
     }
 

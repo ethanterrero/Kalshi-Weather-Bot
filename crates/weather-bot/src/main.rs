@@ -12,6 +12,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 use weather_config::{AppConfig, ExecutionMode};
+use weather_executor::{KalshiOrderClient, KalshiSigner, OrderRequest};
 use weather_forecast::{
     daily_high_stats, daily_low_stats, EnsembleForecast, GefsClient, NwsClient,
 };
@@ -31,6 +32,8 @@ use source_health::{classify as classify_source_freshness, SourceFreshness};
 /// a one-tick blip. Conservative; the loop does refresh-on-demand so the
 /// healthy path never reaches 2× regardless.
 const SOURCE_STALENESS_MULTIPLIER: u32 = 2;
+/// Intended-order keys age out after 24h unless refreshed by a new emission.
+const INTENDED_TRADE_TTL_HOURS: i64 = 24;
 
 /// Command-line flags accepted by the bot binary. Anything not on the CLI
 /// comes from `config/default.toml` + env var overrides.
@@ -61,6 +64,15 @@ type ForecastCache = Arc<RwLock<HashMap<String, (Forecast, DateTime<Utc>)>>>;
 /// per call, so one fetch covers every (date, stat) market we'd price
 /// for that city today and well into the future.
 type EnsembleCache = Arc<RwLock<HashMap<String, (EnsembleForecast, DateTime<Utc>)>>>;
+type IntendedTrades = HashMap<TradeIntentKey, DateTime<Utc>>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TradeIntentKey {
+    ticker: String,
+    side: String,
+    limit_price: String,
+    contracts: u32,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -80,13 +92,11 @@ async fn main() -> Result<()> {
 
     match config.execution.mode {
         ExecutionMode::Live => warn!(
-            "execution.mode = live; live order placement is NOT implemented yet — \
-             staying in dry-run for this run"
+            "execution.mode = live; live sends remain hard-guarded unless explicitly enabled in code"
         ),
-        ExecutionMode::Paper => warn!(
-            "execution.mode = paper; paper-trade adapter is NOT implemented yet — \
-             staying in dry-run for this run"
-        ),
+        ExecutionMode::Paper => {
+            info!("execution.mode = paper; trade decisions will be handed to executor in paper-safe mode")
+        }
         ExecutionMode::DryRun => {}
     }
 
@@ -133,6 +143,8 @@ async fn main() -> Result<()> {
     }
 
     let mut risk = RiskManager::new(config.risk.clone());
+    let mut intended_trades: IntendedTrades = HashMap::new();
+    let mut order_client = build_order_client(&config);
     info!(
         max_position_size_usd = %config.risk.max_position_size_usd,
         max_total_exposure_usd = %config.risk.max_total_exposure_usd,
@@ -158,6 +170,8 @@ async fn main() -> Result<()> {
             &config,
             &decision_logger,
             &mut risk,
+            &mut intended_trades,
+            order_client.as_mut(),
         )
         .await;
         info!("--once pass complete; exiting");
@@ -189,6 +203,8 @@ async fn main() -> Result<()> {
     let ensemble_for_strat = ensemble_cache.clone();
     let logger_for_strat = decision_logger.clone();
     tokio::spawn(async move {
+        let mut intended_trades: IntendedTrades = HashMap::new();
+        let mut order_client = build_order_client(&cfg_for_strat);
         let mut interval = tokio::time::interval(Duration::from_millis(poll_ms));
         interval.tick().await;
         loop {
@@ -202,6 +218,8 @@ async fn main() -> Result<()> {
                 &cfg_for_strat,
                 &logger_for_strat,
                 &mut risk,
+                &mut intended_trades,
+                order_client.as_mut(),
             )
             .await;
         }
@@ -252,6 +270,8 @@ async fn run_one_pass(
     cfg: &AppConfig,
     logger: &DecisionLogger,
     risk: &mut RiskManager,
+    intended_trades: &mut IntendedTrades,
+    order_client: Option<&mut KalshiOrderClient>,
 ) {
     // Dynamic kill switch: cheapest possible check, runs every pass.
     // `realised_loss_24h_usd = None` until the executor lands a fill
@@ -268,7 +288,19 @@ async fn run_one_pass(
         }
     }
 
-    run_strategy_pass(scanner, nws, gefs, cache, ensemble_cache, cfg, logger, risk).await;
+    run_strategy_pass(
+        scanner,
+        nws,
+        gefs,
+        cache,
+        ensemble_cache,
+        cfg,
+        logger,
+        risk,
+        intended_trades,
+        order_client,
+    )
+    .await;
 }
 
 /// Read tracked markets, refresh forecasts on demand, run pricing + EV gate
@@ -283,6 +315,8 @@ async fn run_strategy_pass(
     cfg: &AppConfig,
     logger: &DecisionLogger,
     risk: &mut RiskManager,
+    intended_trades: &mut IntendedTrades,
+    mut order_client: Option<&mut KalshiOrderClient>,
 ) {
     let snapshot = {
         let lock = scanner.markets();
@@ -300,6 +334,7 @@ async fn run_strategy_pass(
     // confirmations to persist between passes. When live trading lands this
     // gets replaced with a snapshot pulled from /portfolio/positions.
     risk.reset_for_pass();
+    prune_intended_trades(intended_trades);
 
     let fees = FeeModel {
         multiplier: cfg.strategy.fee_multiplier,
@@ -433,6 +468,43 @@ async fn run_strategy_pass(
                 ),
             };
         summary.tally_decision(&decision);
+        let now = Utc::now();
+        let mut risk_outcome: Option<&'static str> = None;
+        let mut execution_outcome: Option<&'static str> = None;
+
+        // Trade handoff: duplicate-intent guard -> risk layer -> execution.
+        if let Decision::Trade(sig, _) = &decision {
+            let intent_key = TradeIntentKey::from_signal(sig);
+            match intended_trades.entry(intent_key) {
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    execution_outcome = Some("suppressed_duplicate_intended");
+                    summary.suppressed_duplicate_intended += 1;
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => match apply_risk(risk, sig) {
+                    RiskApplyResult::Approved {
+                        signal,
+                        outcome_tag,
+                    } => {
+                        risk_outcome = Some(outcome_tag);
+                        let exec_tag =
+                            execute_trade(cfg.execution.mode, order_client.as_deref_mut(), &signal)
+                                .await;
+                        execution_outcome = Some(exec_tag);
+                        summary.tally_execution(exec_tag);
+                        if should_register_intended_trade(exec_tag) {
+                            slot.insert(now);
+                        }
+                    }
+                    RiskApplyResult::Rejected {
+                        reason,
+                        outcome_tag,
+                    } => {
+                        risk_outcome = Some(outcome_tag);
+                        summary.tally_risk_reject(&reason);
+                    }
+                },
+            }
+        }
 
         let record = record_from(
             &tracked.market,
@@ -440,23 +512,21 @@ async fn run_strategy_pass(
             &pricing,
             &decision,
             cfg.execution.mode,
-            Utc::now(),
+            risk_outcome,
+            execution_outcome,
+            now,
         );
         if let Err(e) = logger.record(&record).await {
             warn!(error = %e, ticker = %tracked.market.ticker, "decision log write failed");
         }
 
-        log_decision(&tracked.market.ticker, &pricing, &decision);
-
-        // Run Trade signals through the risk layer. Position-size and
-        // total-exposure caps may clip the contract count; the concurrent-
-        // positions cap may reject outright; the per-market cooldown may
-        // reject if we just emitted a signal for this market.
-        if let Decision::Trade(sig, _) = &decision {
-            if let Some(reject) = apply_risk(risk, sig) {
-                summary.tally_risk_reject(&reject);
-            }
-        }
+        log_decision(
+            &tracked.market.ticker,
+            &pricing,
+            &decision,
+            risk_outcome,
+            execution_outcome,
+        );
     }
 
     summary.emit(scanned);
@@ -488,6 +558,19 @@ struct PassSummary {
     risk_in_cooldown: usize,
     risk_concurrent_capped: usize,
     risk_no_budget: usize,
+    /// Trade decision suppressed because the same intended order is already
+    /// in-flight in local state.
+    suppressed_duplicate_intended: usize,
+    /// Execution statuses for Trade rows. Mutually exclusive — each
+    /// post-risk Trade increments exactly one of these. (Trades suppressed
+    /// before risk by the duplicate-intent guard are counted in
+    /// `suppressed_duplicate_intended` instead.)
+    exec_paper_submitted: usize,
+    exec_paper_suppressed_kill_switch: usize,
+    exec_paper_suppressed_no_client: usize,
+    exec_dry_run_suppressed: usize,
+    exec_live_guarded: usize,
+    exec_errors: usize,
     /// NWS forecasts skipped because the cached value crossed the
     /// staleness threshold and a refresh attempt failed. One per market
     /// affected — operator should grep `source_stale` log lines for
@@ -523,6 +606,18 @@ impl PassSummary {
         }
     }
 
+    fn tally_execution(&mut self, execution_outcome: &str) {
+        match execution_outcome {
+            "paper_submitted" => self.exec_paper_submitted += 1,
+            "paper_suppressed_never_send" => self.exec_paper_suppressed_kill_switch += 1,
+            "paper_suppressed_no_client" => self.exec_paper_suppressed_no_client += 1,
+            "dry_run_suppressed" => self.exec_dry_run_suppressed += 1,
+            "live_guarded" => self.exec_live_guarded += 1,
+            "paper_error" => self.exec_errors += 1,
+            _ => {}
+        }
+    }
+
     fn emit(&self, scanned: usize) {
         info!(
             scanned,
@@ -541,6 +636,13 @@ impl PassSummary {
             risk_in_cooldown = self.risk_in_cooldown,
             risk_concurrent_capped = self.risk_concurrent_capped,
             risk_no_budget = self.risk_no_budget,
+            suppressed_duplicate_intended = self.suppressed_duplicate_intended,
+            exec_paper_submitted = self.exec_paper_submitted,
+            exec_paper_suppressed_kill_switch = self.exec_paper_suppressed_kill_switch,
+            exec_paper_suppressed_no_client = self.exec_paper_suppressed_no_client,
+            exec_dry_run_suppressed = self.exec_dry_run_suppressed,
+            exec_live_guarded = self.exec_live_guarded,
+            exec_errors = self.exec_errors,
             nws_source_stale = self.nws_source_stale,
             gefs_source_stale = self.gefs_source_stale,
             "strategy pass complete"
@@ -658,7 +760,18 @@ fn nws_lockout_decision(forecast: &Forecast, lockout_secs: u64) -> Option<NoTrad
 
 /// Apply risk caps to a strategy signal. Returns the reject reason (if any)
 /// so the per-pass summary can tally how often each cap fires.
-fn apply_risk(risk: &mut RiskManager, signal: &weather_types::Signal) -> Option<RejectReason> {
+enum RiskApplyResult {
+    Approved {
+        signal: weather_types::Signal,
+        outcome_tag: &'static str,
+    },
+    Rejected {
+        reason: RejectReason,
+        outcome_tag: &'static str,
+    },
+}
+
+fn apply_risk(risk: &mut RiskManager, signal: &weather_types::Signal) -> RiskApplyResult {
     let original_contracts = signal.contracts;
     match risk.evaluate(signal.clone()) {
         RiskDecision::Approve(s) => {
@@ -669,9 +782,18 @@ fn apply_risk(risk: &mut RiskManager, signal: &weather_types::Signal) -> Option<
                 pass_exposure_usd = %risk.pass_exposure_usd(),
                 "risk: approved"
             );
-            None
+            RiskApplyResult::Approved {
+                signal: s,
+                outcome_tag: "approved",
+            }
         }
         RiskDecision::Adjusted(s, reason) => {
+            let outcome_tag = match reason {
+                weather_risk::AdjustReason::PositionSizeClipped => "adjusted_position_size_clipped",
+                weather_risk::AdjustReason::TotalExposureClipped => {
+                    "adjusted_total_exposure_clipped"
+                }
+            };
             info!(
                 ticker = %s.market_ticker,
                 contracts = s.contracts,
@@ -681,9 +803,17 @@ fn apply_risk(risk: &mut RiskManager, signal: &weather_types::Signal) -> Option<
                 pass_exposure_usd = %risk.pass_exposure_usd(),
                 "risk: clipped position size"
             );
-            None
+            RiskApplyResult::Approved {
+                signal: s,
+                outcome_tag,
+            }
         }
         RiskDecision::Reject(reason) => {
+            let outcome_tag = match reason {
+                RejectReason::InCooldown { .. } => "rejected_in_cooldown",
+                RejectReason::ConcurrentPositionsCapped => "rejected_concurrent_capped",
+                RejectReason::NoBudgetRemaining => "rejected_no_budget",
+            };
             info!(
                 ticker = %signal.market_ticker,
                 reason = ?reason,
@@ -691,12 +821,21 @@ fn apply_risk(risk: &mut RiskManager, signal: &weather_types::Signal) -> Option<
                 pass_position_count = risk.pass_position_count(),
                 "risk: rejected"
             );
-            Some(reason)
+            RiskApplyResult::Rejected {
+                reason,
+                outcome_tag,
+            }
         }
     }
 }
 
-fn log_decision(ticker: &str, pricing: &weather_pricing::ModelPricing, decision: &Decision) {
+fn log_decision(
+    ticker: &str,
+    pricing: &weather_pricing::ModelPricing,
+    decision: &Decision,
+    risk_outcome: Option<&str>,
+    execution_outcome: Option<&str>,
+) {
     match decision {
         Decision::Trade(sig, ev) => {
             info!(
@@ -714,6 +853,8 @@ fn log_decision(ticker: &str, pricing: &weather_pricing::ModelPricing, decision:
                 forecast_temp_f = pricing.forecast_temp_f,
                 horizon_days = pricing.horizon_days,
                 sigma_f = pricing.sigma_f,
+                risk_outcome = ?risk_outcome,
+                execution_outcome = ?execution_outcome,
                 "TRADE (dry-run)"
             );
         }
@@ -733,6 +874,97 @@ fn log_decision(ticker: &str, pricing: &weather_pricing::ModelPricing, decision:
             }
         },
     }
+}
+
+impl TradeIntentKey {
+    fn from_signal(signal: &weather_types::Signal) -> Self {
+        Self {
+            ticker: signal.market_ticker.clone(),
+            side: format!("{:?}", signal.side),
+            limit_price: signal.limit_price.normalize().to_string(),
+            contracts: signal.contracts,
+        }
+    }
+}
+
+fn prune_intended_trades(intended_trades: &mut IntendedTrades) {
+    let cutoff = Utc::now() - chrono::Duration::hours(INTENDED_TRADE_TTL_HOURS);
+    intended_trades.retain(|_, ts| *ts > cutoff);
+}
+
+fn should_register_intended_trade(execution_outcome: &str) -> bool {
+    matches!(
+        execution_outcome,
+        "dry_run_suppressed" | "paper_suppressed_never_send" | "paper_submitted"
+    )
+}
+
+async fn execute_trade(
+    mode: ExecutionMode,
+    order_client: Option<&mut KalshiOrderClient>,
+    signal: &weather_types::Signal,
+) -> &'static str {
+    match mode {
+        ExecutionMode::DryRun => "dry_run_suppressed",
+        ExecutionMode::Live => "live_guarded",
+        ExecutionMode::Paper => {
+            let Some(client) = order_client else {
+                warn!(
+                    ticker = %signal.market_ticker,
+                    "paper mode: no executor client available; suppressing send"
+                );
+                return "paper_suppressed_no_client";
+            };
+            let req = OrderRequest::from_signal(signal);
+            match client.place_order(&req).await {
+                Ok(Some(_)) => "paper_submitted",
+                Ok(None) => "paper_suppressed_never_send",
+                Err(e) => {
+                    warn!(
+                        ticker = %signal.market_ticker,
+                        error = %e,
+                        "paper mode order placement failed"
+                    );
+                    "paper_error"
+                }
+            }
+        }
+    }
+}
+
+fn build_order_client(cfg: &AppConfig) -> Option<KalshiOrderClient> {
+    if !matches!(
+        cfg.execution.mode,
+        ExecutionMode::Paper | ExecutionMode::Live
+    ) {
+        return None;
+    }
+    let key_id = match AppConfig::kalshi_api_key_id() {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, "executor disabled: missing KALSHI_API_KEY_ID");
+            return None;
+        }
+    };
+    let key_path = match AppConfig::kalshi_private_key_path() {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, "executor disabled: missing KALSHI_PRIVATE_KEY_PATH");
+            return None;
+        }
+    };
+    let signer = match KalshiSigner::from_pem_file(std::path::Path::new(&key_path)) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, path = %key_path, "executor disabled: invalid private key");
+            return None;
+        }
+    };
+    Some(KalshiOrderClient::new(
+        cfg.kalshi.base_url().to_string(),
+        key_id,
+        signer,
+    ))
 }
 
 fn init_tracing(config: &weather_config::LoggingConfig) {

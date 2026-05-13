@@ -101,7 +101,7 @@ What's real:
 - **Executor**: Kalshi RSA-PSS-SHA256 auth, `OrderRequest::from_signal`, `POST /portfolio/orders`. **Kill-switched** via a hard-coded `never_send=true` flag — disabling requires an explicit `client.allow_real_sends()` code edit, not a config knob.
 
 What's still pending:
-- The executor isn't yet called from the strategy loop (auth path exists but the bot doesn't hand `Decision::Trade` over to it).
+- Full live order enablement and lifecycle management (open-order sync, cancel/reprice, stale-quote handling). The strategy loop now hands `Decision::Trade` through risk + executor in `paper` mode, and logs execution outcomes per row.
 - Per-market cooldown, per-(city, date) correlated-exposure cap, bankroll-fraction Kelly.
 - WebSocket orderbook deltas (v1 uses REST polling).
 - Historical Kalshi candle backfill and fill/lifecycle-aware realised P&L. The recent candle fetcher exists and replay can print an immediate spread/fee mark, but that is not the same as settled or fill-aware strategy P&L.
@@ -118,7 +118,7 @@ Edit `config/default.toml`. Override with env vars using `__` (e.g. `STRATEGY__M
 | Section | Key | Meaning |
 |---|---|---|
 | **kalshi** | `env` | `"demo"` (paper trading at demo-api.kalshi.co) or `"prod"` (real money at trading-api.kalshi.com). |
-| **execution** | `mode` | `"dry_run"` (default) or `"live"`. Live additionally requires `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` env vars and `kalshi.env="prod"`. Note: the executor's `never_send` kill-switch is *separate* and hard-coded in code; flipping `mode` to `"live"` is not enough to actually place orders. |
+| **execution** | `mode` | `"dry_run"` (default), `"paper"`, or `"live"`. `paper` uses the same handoff path as live (`Decision::Trade -> risk -> executor`) but remains safety-gated by the executor kill-switch unless explicitly disabled in code. `live` additionally requires `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` and `kalshi.env="prod"`. |
 | **forecast** | `nws_base_url` | NOAA NWS base. Default `https://api.weather.gov`. |
 | | `user_agent` | NWS rejects requests without a meaningful UA. **Edit this with your contact email.** |
 | | `refresh_interval_secs` | How often to re-poll NWS forecasts. Default 1800. |
@@ -152,9 +152,9 @@ cargo run --release -p weather-bot
 
 Run from the repo root — config is loaded from `config/default.toml` relative to the working directory.
 
-The bot is **safe by default**: `execution.mode = "dry_run"` and the executor's `never_send=true` kill-switch are *both* on. The bot scans markets, runs the model, evaluates risk caps, and writes JSONL decisions, but **places no orders**. Flipping `mode = "live"` is not enough — disabling `never_send` requires a code edit (`client.allow_real_sends()` in [crates/weather-executor/src/orders.rs](crates/weather-executor/src/orders.rs)).
+The bot is **safe by default**: `execution.mode = "dry_run"` and the executor's `never_send=true` kill-switch are *both* on. In this mode the bot scans markets, runs the model, evaluates risk caps, and writes JSONL decisions, but **places no orders**. `paper` mode now runs the same risk/executor handoff and stamps each row with `risk_outcome` + `execution_outcome`; real sends still require explicitly disabling `never_send` in code (`client.allow_real_sends()` in [crates/weather-executor/src/orders.rs](crates/weather-executor/src/orders.rs)).
 
-For (eventual) live trading: copy `.env.example` → `.env`, set `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH`, point the path at the PEM file Kalshi gave you, set `KALSHI_ENV=prod` and `execution.mode = "live"`. The bot doesn't yet wire the executor into the strategy loop — that's an outstanding ROADMAP item.
+For (eventual) live trading: copy `.env.example` → `.env`, set `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH`, point the path at the PEM file Kalshi gave you, set `KALSHI_ENV=prod` and `execution.mode = "live"`. The strategy loop now hands `Decision::Trade` through the executor in `paper` mode; flipping to `live` additionally requires explicitly disabling the executor's `never_send` kill-switch in code (see `client.allow_real_sends()` in [crates/weather-executor/src/orders.rs](crates/weather-executor/src/orders.rs)).
 
 ### The calibration runner
 

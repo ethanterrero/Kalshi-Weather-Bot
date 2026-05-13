@@ -108,6 +108,7 @@ async fn main() -> Result<()> {
         );
     }
     print_row_counts_by_sigma(&rows);
+    print_trade_execution_outcomes(&rows);
 
     if !args.skip_outcomes {
         let joined = fetch_and_join_outcomes(&rows).await?;
@@ -212,6 +213,24 @@ fn print_row_counts_by_sigma(rows: &[DecisionRow]) {
     }
     for (source, n) in counts {
         println!("  {} rows: {}", source, n);
+    }
+}
+
+fn print_trade_execution_outcomes(rows: &[DecisionRow]) {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for row in rows {
+        if !is_trade_row(row) {
+            continue;
+        }
+        let key = row.execution_outcome.as_deref().unwrap_or("unknown");
+        *counts.entry(key).or_default() += 1;
+    }
+    if counts.is_empty() {
+        return;
+    }
+    println!("  trade rows by execution_outcome:");
+    for (outcome, n) in counts {
+        println!("    {outcome}: {n}");
     }
 }
 
@@ -536,6 +555,8 @@ mod tests {
             raw_edge: Some(rust_decimal_macros::dec!(0.15)),
             net_ev_per_contract: Some(rust_decimal_macros::dec!(0.13)),
             market_p_implied: Some(rust_decimal_macros::dec!(0.45)),
+            risk_outcome: Some("approved".to_string()),
+            execution_outcome: Some("dry_run_suppressed".to_string()),
         }
     }
 }

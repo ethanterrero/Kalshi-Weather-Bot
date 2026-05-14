@@ -172,6 +172,8 @@ fn synth_decision(
         raw_edge: None,
         net_ev_per_contract: None,
         market_p_implied: None,
+        risk_outcome: None,
+        execution_outcome: None,
     };
     JoinedDecision {
         row,

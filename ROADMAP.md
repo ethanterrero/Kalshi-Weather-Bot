@@ -281,10 +281,12 @@ selected on every fill.
   `OrderRequest::from_signal` always sets `post_only = true` and uses the
   signal's `limit_price` (which the strategy populates with the opposite-
   side ask).
-- [ ] **Wire the executor into the strategy loop.** Today the bot has the
-  executor crate available but `run_strategy_pass` doesn't actually call
-  `place_order`. Needs the same `Decision::Trade` → executor handoff the
-  risk layer already has.
+- [x] **Wire the executor into the strategy loop (paper-safe path).** `run_strategy_pass`
+  now performs `Decision::Trade` → duplicate-intent guard → `RiskManager` →
+  `OrderRequest::from_signal` → `KalshiOrderClient::place_order` when
+  `execution.mode = paper`. Rows now include `risk_outcome` and
+  `execution_outcome` so replay can separate strategy intent from execution
+  attempts. Live sends remain guarded unless explicitly enabled in code.
 - [ ] **Order lifecycle tracking.** Track open orders via
   `/portfolio/orders` and reconcile with our local "intended" state every
   pass. Cancel-and-reprice if our model probability moves > X bps, the book
@@ -471,9 +473,9 @@ edge exists" and "make it safe to actually trade".
 4. **Opportunity-level resolved metrics.** Before treating replay calibration
    as model evidence, add grouping/weighting so repeated dry-run emissions
    don't dominate Brier/log-loss/calibration buckets.
-5. **Dry-run intended-position state.** Stop the bot from re-emitting the same
-   opportunity every pass. This keeps logs readable and mirrors the state
-   live order lifecycle tracking will eventually need.
+5. **Dry-run intended-position state.** ✅ Implemented: the bot now keeps an
+   intended-trade map keyed by `(ticker, side, limit_price, contracts)` and
+   suppresses duplicate emissions as `execution_outcome=suppressed_duplicate_intended`.
 6. **Historical Kalshi candle backfill.** The recent `/candlesticks` fetcher
    exists, but older windows need Kalshi's historical candle endpoint (or an
    archive) before we can compute canonical long-window net-of-fee expectancy.
@@ -498,10 +500,10 @@ edge exists" and "make it safe to actually trade".
    the real orderbook. Reveals lifecycle bugs (cancel-and-reprice,
    queue position, stale quote, partial fills, rejections, timeouts)
    that dry-run can't because dry-run never actually places anything.
-10. **Wire the executor into the strategy loop.** Now (after items 8-9
-   land) the bot can actually trade. `Decision::Trade` →
-   `OrderRequest::from_signal` → `KalshiOrderClient::place_order`,
-   gated by `cfg.execution.mode` and `never_send`.
+10. **Wire the executor into the strategy loop.** ✅ Implemented for paper-safe
+   flow. `Decision::Trade` now hands off through risk into the executor path
+   in `paper` mode; `never_send` still hard-guards real HTTP placement until
+   intentionally disabled.
 11. **Per-market cooldown + bankroll-fraction Kelly.** Phase 6's open
    items. Both small. Lets the bot run unattended without thrashing.
 12. **METAR / station observations.** Phase 2's "biggest potential

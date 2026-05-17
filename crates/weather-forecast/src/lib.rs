@@ -18,6 +18,7 @@
 pub mod cli;
 pub mod gefs;
 pub mod historical_forecast;
+pub mod metar;
 
 pub use cli::{parse_cli_json, CliError, CliReport, IemCliClient};
 pub use gefs::{
@@ -26,6 +27,10 @@ pub use gefs::{
 };
 pub use historical_forecast::{
     parse_historical_json, HistoricalForecast, HistoricalForecastClient, HistoricalForecastError,
+};
+pub use metar::{
+    parse_observations_json, running_high_f, running_low_f, MetarClient, MetarError,
+    MetarObservation, MetarSnapshot, QualityFlag,
 };
 
 use chrono::{DateTime, Utc};

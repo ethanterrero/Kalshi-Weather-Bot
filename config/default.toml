@@ -5,12 +5,16 @@ env = "demo"
 
 [execution]
 # "dry_run" → log decisions only (no orders, no risk).
-# "paper"   → same code path as live, routed through paper-trade endpoint
-#             or local mock. Surfaces lifecycle bugs dry-run can't catch.
+# "paper"   → same code path as live, but the executor still short-circuits
+#             on its hard-coded `never_send=true` flag before any HTTP. Every
+#             Decision::Trade flows through risk → executor → "suppressed_
+#             never_send" so we exercise the full lifecycle (duplicate-intent
+#             guard, risk caps, signing, order request shape) without sending.
+#             Disabling `never_send` requires an explicit code edit
+#             (`client.allow_real_sends()`) — not a config knob, by design.
 # "live"    → real money. Requires KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY_PATH
-#             AND KALSHI_ENV=prod AND an explicit code-edit to the executor's
-#             never_send flag. Default keeps you safe.
-mode = "dry_run"
+#             AND KALSHI_ENV=prod AND `client.allow_real_sends()`.
+mode = "paper"
 
 [forecast]
 # NOAA NWS API base. Public endpoint, no auth, but they ask for a User-Agent.

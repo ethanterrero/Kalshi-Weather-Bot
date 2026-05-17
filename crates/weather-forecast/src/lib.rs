@@ -21,8 +21,8 @@ pub mod historical_forecast;
 
 pub use cli::{parse_cli_json, CliError, CliReport, IemCliClient};
 pub use gefs::{
-    daily_high_stats, daily_low_stats, parse_ensemble_json, EnsembleForecast, EnsembleStat,
-    GefsClient, GefsError,
+    daily_high_stats, daily_low_stats, parse_ensemble_json, pooled_daily_high_stats,
+    pooled_daily_low_stats, EnsembleForecast, EnsembleStat, GefsClient, GefsError,
 };
 pub use historical_forecast::{
     parse_historical_json, HistoricalForecast, HistoricalForecastClient, HistoricalForecastError,

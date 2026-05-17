@@ -14,9 +14,12 @@ use tracing::{info, warn};
 use weather_config::{AppConfig, ExecutionMode};
 use weather_executor::{KalshiOrderClient, KalshiSigner, OrderRequest};
 use weather_forecast::{
-    daily_high_stats, daily_low_stats, EnsembleForecast, GefsClient, NwsClient,
+    pooled_daily_high_stats, pooled_daily_low_stats, EnsembleForecast, GefsClient, NwsClient,
 };
-use weather_pricing::{price_market_with_sigma, PricingError};
+use weather_pricing::{
+    price_market_with_sigma, PricingError, SIGMA_SOURCE_ECMWF_ENSEMBLE,
+    SIGMA_SOURCE_GEFS_ECMWF_BLEND, SIGMA_SOURCE_GEFS_ENSEMBLE,
+};
 use weather_risk::{RejectReason, RiskDecision, RiskManager};
 use weather_scanner::MarketScanner;
 use weather_strategy::{decide, Decision, FeeModel, NoTradeReason};
@@ -59,11 +62,31 @@ struct Cli {
 /// market for a city/day shares one forecast).
 type ForecastCache = Arc<RwLock<HashMap<String, (Forecast, DateTime<Utc>)>>>;
 
-/// Same as ForecastCache but for GEFS ensemble fetches. Open-Meteo
-/// returns 30 perturbed members + a control out to ~16 forecast days
-/// per call, so one fetch covers every (date, stat) market we'd price
-/// for that city today and well into the future.
+/// Same as ForecastCache but for ensemble fetches. Open-Meteo returns
+/// 30 (GEFS) or 50 (ECMWF) perturbed members + a control out to ~15-16
+/// forecast days per call, so one fetch covers every (date, stat) market
+/// we'd price for that city today and well into the future. The bot keeps
+/// one cache per source so the two are refreshed independently and the
+/// pooling layer can ask "do we have either, both, or neither?" cheaply.
 type EnsembleCache = Arc<RwLock<HashMap<String, (EnsembleForecast, DateTime<Utc>)>>>;
+
+/// Which Open-Meteo ensemble a `(σ, source_tag)` comes from. Used by the
+/// shared fetch + pooling helpers so the bot only encodes the GEFS-vs-ECMWF
+/// distinction in one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnsembleSource {
+    Gefs,
+    Ecmwf,
+}
+
+impl EnsembleSource {
+    fn label(&self) -> &'static str {
+        match self {
+            EnsembleSource::Gefs => "gefs",
+            EnsembleSource::Ecmwf => "ecmwf",
+        }
+    }
+}
 type IntendedTrades = HashMap<TradeIntentKey, DateTime<Utc>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -107,7 +130,8 @@ async fn main() -> Result<()> {
     ));
     let gefs = Arc::new(GefsClient::open_meteo());
     let forecast_cache: ForecastCache = Arc::new(RwLock::new(HashMap::new()));
-    let ensemble_cache: EnsembleCache = Arc::new(RwLock::new(HashMap::new()));
+    let gefs_cache: EnsembleCache = Arc::new(RwLock::new(HashMap::new()));
+    let ecmwf_cache: EnsembleCache = Arc::new(RwLock::new(HashMap::new()));
 
     let decision_logger = Arc::new(DecisionLogger::new(
         config
@@ -156,7 +180,9 @@ async fn main() -> Result<()> {
     info!(
         gefs_enabled = config.forecast.gefs_sigma_enabled,
         gefs_refresh_secs = config.forecast.gefs_refresh_interval_secs,
-        "GEFS σ source"
+        ecmwf_enabled = config.forecast.ecmwf_sigma_enabled,
+        ecmwf_refresh_secs = config.forecast.ecmwf_refresh_interval_secs,
+        "ensemble σ sources"
     );
 
     if cli.once {
@@ -166,7 +192,8 @@ async fn main() -> Result<()> {
             &nws,
             &gefs,
             &forecast_cache,
-            &ensemble_cache,
+            &gefs_cache,
+            &ecmwf_cache,
             &config,
             &decision_logger,
             &mut risk,
@@ -200,7 +227,8 @@ async fn main() -> Result<()> {
     let nws_for_strat = nws.clone();
     let gefs_for_strat = gefs.clone();
     let cache_for_strat = forecast_cache.clone();
-    let ensemble_for_strat = ensemble_cache.clone();
+    let gefs_for_loop = gefs_cache.clone();
+    let ecmwf_for_loop = ecmwf_cache.clone();
     let logger_for_strat = decision_logger.clone();
     tokio::spawn(async move {
         let mut intended_trades: IntendedTrades = HashMap::new();
@@ -214,7 +242,8 @@ async fn main() -> Result<()> {
                 &nws_for_strat,
                 &gefs_for_strat,
                 &cache_for_strat,
-                &ensemble_for_strat,
+                &gefs_for_loop,
+                &ecmwf_for_loop,
                 &cfg_for_strat,
                 &logger_for_strat,
                 &mut risk,
@@ -266,7 +295,8 @@ async fn run_one_pass(
     nws: &NwsClient,
     gefs: &GefsClient,
     cache: &ForecastCache,
-    ensemble_cache: &EnsembleCache,
+    gefs_cache: &EnsembleCache,
+    ecmwf_cache: &EnsembleCache,
     cfg: &AppConfig,
     logger: &DecisionLogger,
     risk: &mut RiskManager,
@@ -293,7 +323,8 @@ async fn run_one_pass(
         nws,
         gefs,
         cache,
-        ensemble_cache,
+        gefs_cache,
+        ecmwf_cache,
         cfg,
         logger,
         risk,
@@ -311,7 +342,8 @@ async fn run_strategy_pass(
     nws: &NwsClient,
     gefs: &GefsClient,
     cache: &ForecastCache,
-    ensemble_cache: &EnsembleCache,
+    gefs_cache: &EnsembleCache,
+    ecmwf_cache: &EnsembleCache,
     cfg: &AppConfig,
     logger: &DecisionLogger,
     risk: &mut RiskManager,
@@ -340,7 +372,8 @@ async fn run_strategy_pass(
         multiplier: cfg.strategy.fee_multiplier,
     };
     let refresh_after = Duration::from_secs(cfg.forecast.refresh_interval_secs);
-    let ensemble_refresh_after = Duration::from_secs(cfg.forecast.gefs_refresh_interval_secs);
+    let gefs_refresh_after = Duration::from_secs(cfg.forecast.gefs_refresh_interval_secs);
+    let ecmwf_refresh_after = Duration::from_secs(cfg.forecast.ecmwf_refresh_interval_secs);
 
     for tracked in snapshot {
         let city_code = &tracked.threshold.city;
@@ -421,20 +454,46 @@ async fn run_strategy_pass(
             }
         };
 
-        // Optional GEFS ensemble σ override. Refresh-on-demand similar to
-        // NWS, but on its own (longer) cadence — ensemble runs only update
-        // every 6h. Failures fall back silently to the static σ table; no
-        // reason to abandon the trade just because one source is down.
-        let sigma_override = if cfg.forecast.gefs_sigma_enabled {
-            let stale =
-                ensure_ensemble_fresh(gefs, ensemble_cache, city, ensemble_refresh_after).await;
+        // Optional ensemble σ override. Refresh-on-demand similar to NWS,
+        // but each source has its own (longer) cadence — ensemble runs
+        // only update every 6h. Failures fall back silently: the
+        // strategy uses whichever source is available, and falls back to
+        // the static σ table when both are absent.
+        if cfg.forecast.gefs_sigma_enabled {
+            let stale = ensure_ensemble_fresh(
+                gefs,
+                gefs_cache,
+                city,
+                gefs_refresh_after,
+                EnsembleSource::Gefs,
+            )
+            .await;
             if stale {
                 summary.gefs_source_stale += 1;
             }
-            resolve_gefs_sigma(ensemble_cache, city, &tracked.threshold).await
-        } else {
-            None
-        };
+        }
+        if cfg.forecast.ecmwf_sigma_enabled {
+            let stale = ensure_ensemble_fresh(
+                gefs,
+                ecmwf_cache,
+                city,
+                ecmwf_refresh_after,
+                EnsembleSource::Ecmwf,
+            )
+            .await;
+            if stale {
+                summary.ecmwf_source_stale += 1;
+            }
+        }
+        let sigma_override = resolve_ensemble_sigma(
+            gefs_cache,
+            ecmwf_cache,
+            city,
+            &tracked.threshold,
+            cfg.forecast.gefs_sigma_enabled,
+            cfg.forecast.ecmwf_sigma_enabled,
+        )
+        .await;
 
         let pricing = match price_market_with_sigma(&tracked.threshold, &forecast, sigma_override) {
             Ok(p) => p,
@@ -581,6 +640,10 @@ struct PassSummary {
     /// separately so the operator can tell whether the bot has been
     /// running on the static table all day.
     gefs_source_stale: usize,
+    /// ECMWF IFS-0.25° ensemble σ skipped because the cached run is
+    /// stale. Same fallback semantics as `gefs_source_stale` — the
+    /// pricing layer pools whichever source is still warm.
+    ecmwf_source_stale: usize,
 }
 
 impl PassSummary {
@@ -645,25 +708,26 @@ impl PassSummary {
             exec_errors = self.exec_errors,
             nws_source_stale = self.nws_source_stale,
             gefs_source_stale = self.gefs_source_stale,
+            ecmwf_source_stale = self.ecmwf_source_stale,
             "strategy pass complete"
         );
     }
 }
 
-/// Refresh the cached GEFS ensemble for `city` if it's missing or stale.
-/// Failures are logged at warn but do not propagate — the strategy loop
-/// falls back to the static σ table whenever no fresh ensemble is
-/// available.
+/// Refresh the cached ensemble for `(source, city)` if it's missing or
+/// stale. Failures are logged at warn but do not propagate — the strategy
+/// loop falls back to whichever sources are still fresh, or to the static
+/// σ table if neither is.
 ///
 /// Returns `true` when the cache crossed the staleness threshold AND the
 /// most recent refresh attempt failed. The caller treats this as
-/// "ensemble σ is unavailable" (falls back to static) and increments the
-/// `gefs_source_stale` counter.
+/// "this source is unavailable" and bumps the per-source stale counter.
 async fn ensure_ensemble_fresh(
     gefs: &GefsClient,
     cache: &EnsembleCache,
     city: &CitySpec,
     refresh_after: Duration,
+    source: EnsembleSource,
 ) -> bool {
     let cached_ts = {
         let read = cache.read().await;
@@ -684,7 +748,11 @@ async fn ensure_ensemble_fresh(
     }
     // 7 forecast days covers everything NWS prices today and gives the
     // pricing layer a horizon match for any in-horizon market.
-    match gefs.fetch_gfs05(city.lat, city.lon, 7).await {
+    let fetch = match source {
+        EnsembleSource::Gefs => gefs.fetch_gfs05(city.lat, city.lon, 7).await,
+        EnsembleSource::Ecmwf => gefs.fetch_ecmwf_ifs025(city.lat, city.lon, 7).await,
+    };
+    match fetch {
         Ok(f) => {
             let mut write = cache.write().await;
             write.insert(city.kalshi_code.to_string(), (f, Utc::now()));
@@ -699,35 +767,62 @@ async fn ensure_ensemble_fresh(
             );
             if let SourceFreshness::Stale { age, threshold } = freshness {
                 warn!(
-                    source = "gefs",
+                    source = source.label(),
                     city = city.kalshi_code,
                     error = %e,
                     age_secs = age.as_secs(),
                     threshold_secs = threshold.as_secs(),
-                    "source_stale: GEFS cache past staleness threshold and refresh failed; falling back to static σ"
+                    "source_stale: ensemble cache past staleness threshold and refresh failed; falling back to other sources / static σ"
                 );
                 true
             } else {
-                warn!(city = city.kalshi_code, error = %e, "GEFS ensemble fetch failed; falling back to static σ");
+                warn!(source = source.label(), city = city.kalshi_code, error = %e, "ensemble fetch failed; falling back to other sources / static σ");
                 false
             }
         }
     }
 }
 
-/// Pull the cached GEFS ensemble for `city` and derive σ for the market's
-/// (date, stat). Returns `None` whenever no in-window ensemble data is
-/// available — the caller falls back to the static σ table.
-async fn resolve_gefs_sigma(
-    cache: &EnsembleCache,
+/// Pull whichever ensemble caches are populated and warm enough to use,
+/// pool their per-member daily extremes, and derive `(σ, source_tag)` for
+/// this market's (date, stat). Returns `None` whenever no source produced
+/// a usable in-window σ — the caller falls back to the static σ table.
+///
+/// The `*_enabled` flags also gate cache *reads*, so a flipped-off source
+/// is ignored even if a stale fetch left data behind.
+async fn resolve_ensemble_sigma(
+    gefs_cache: &EnsembleCache,
+    ecmwf_cache: &EnsembleCache,
     city: &CitySpec,
     threshold: &weather_types::WeatherThreshold,
-) -> Option<f64> {
-    let read = cache.read().await;
-    let (forecast, _) = read.get(city.kalshi_code)?;
+    gefs_enabled: bool,
+    ecmwf_enabled: bool,
+) -> Option<(f64, &'static str)> {
+    let gefs_read = gefs_cache.read().await;
+    let ecmwf_read = ecmwf_cache.read().await;
+    let gefs_forecast = if gefs_enabled {
+        gefs_read.get(city.kalshi_code).map(|(f, _)| f)
+    } else {
+        None
+    };
+    let ecmwf_forecast = if ecmwf_enabled {
+        ecmwf_read.get(city.kalshi_code).map(|(f, _)| f)
+    } else {
+        None
+    };
+    let mut sources: Vec<&EnsembleForecast> = Vec::with_capacity(2);
+    if let Some(f) = gefs_forecast {
+        sources.push(f);
+    }
+    if let Some(f) = ecmwf_forecast {
+        sources.push(f);
+    }
+    if sources.is_empty() {
+        return None;
+    }
     let stat = match threshold.stat {
-        TempStat::DailyHigh => daily_high_stats(forecast, city, threshold.date)?,
-        TempStat::DailyLow => daily_low_stats(forecast, city, threshold.date)?,
+        TempStat::DailyHigh => pooled_daily_high_stats(&sources, city, threshold.date)?,
+        TempStat::DailyLow => pooled_daily_low_stats(&sources, city, threshold.date)?,
     };
     // A handful of members can produce a zero or near-zero σ that's just
     // sample noise. Guard against that by ignoring tiny σ — we'd rather
@@ -735,7 +830,13 @@ async fn resolve_gefs_sigma(
     if stat.n_members < 5 || stat.sigma_f < 0.25 {
         return None;
     }
-    Some(stat.sigma_f)
+    let tag = match (gefs_forecast.is_some(), ecmwf_forecast.is_some()) {
+        (true, true) => SIGMA_SOURCE_GEFS_ECMWF_BLEND,
+        (true, false) => SIGMA_SOURCE_GEFS_ENSEMBLE,
+        (false, true) => SIGMA_SOURCE_ECMWF_ENSEMBLE,
+        (false, false) => unreachable!("sources non-empty checked above"),
+    };
+    Some((stat.sigma_f, tag))
 }
 
 /// If the NWS forecast was issued less than `lockout_secs` ago, return

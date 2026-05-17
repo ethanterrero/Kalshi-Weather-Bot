@@ -14,7 +14,7 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use weather_pricing::{normal_cdf, price_market_with_sigma};
+use weather_pricing::{normal_cdf, price_market_with_sigma, SIGMA_SOURCE_GEFS_ENSEMBLE};
 use weather_types::{Forecast, ForecastPeriod, TempStat, ThresholdDirection, WeatherThreshold};
 
 fn dt(s: &str) -> DateTime<Utc> {
@@ -97,7 +97,7 @@ fn bench_price_market(c: &mut Criterion) {
             price_market_with_sigma(
                 black_box(&threshold),
                 black_box(&forecast),
-                black_box(Some(2.4)),
+                black_box(Some((2.4, SIGMA_SOURCE_GEFS_ENSEMBLE))),
             )
             .unwrap()
         });

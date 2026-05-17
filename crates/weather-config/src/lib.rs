@@ -122,6 +122,19 @@ pub struct ForecastConfig {
     /// stale window per real run.
     #[serde(default = "default_gefs_refresh_secs")]
     pub gefs_refresh_interval_secs: u64,
+    /// Use ECMWF IFS-0.25° ensemble σ in pricing. When `true` and GEFS is
+    /// also enabled, the bot pools per-member daily extremes from both
+    /// ensembles and computes a blended `(μ, σ)` — the JSONL stamps
+    /// `sigma_source = "gefs_ecmwf_blend"` so the backtester can split
+    /// metrics. When `true` and GEFS is disabled, ECMWF alone is used
+    /// (tag `"ecmwf_ensemble"`). Fallback to static σ on fetch failure
+    /// matches the GEFS path. Default true.
+    #[serde(default = "default_ecmwf_sigma_enabled")]
+    pub ecmwf_sigma_enabled: bool,
+    /// How often to refresh the ECMWF ensemble (seconds). ECMWF publishes
+    /// new runs every ~6h on the same cadence as GEFS; 1800 = 30 min.
+    #[serde(default = "default_ecmwf_refresh_secs")]
+    pub ecmwf_refresh_interval_secs: u64,
 }
 
 fn default_nws_lockout_secs() -> u64 {
@@ -133,6 +146,14 @@ fn default_gefs_sigma_enabled() -> bool {
 }
 
 fn default_gefs_refresh_secs() -> u64 {
+    1800
+}
+
+fn default_ecmwf_sigma_enabled() -> bool {
+    true
+}
+
+fn default_ecmwf_refresh_secs() -> u64 {
     1800
 }
 

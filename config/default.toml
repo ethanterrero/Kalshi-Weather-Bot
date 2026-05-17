@@ -32,6 +32,14 @@ gefs_sigma_enabled = true
 # GEFS refresh cadence (seconds). GEFS publishes new runs every ~6h;
 # 1800 = 30 min gives us at most one stale window per run.
 gefs_refresh_interval_secs = 1800
+# Use ECMWF IFS-0.25° ensemble (Open-Meteo, 50 perturbed members)
+# alongside GEFS. When both are enabled, per-member daily extremes from
+# both sources are pooled into a blended (μ, σ); the JSONL stamps
+# sigma_source = "gefs_ecmwf_blend" so backtests can split metrics by
+# source. Static table remains the fallback whenever both ensembles are
+# unavailable for a market.
+ecmwf_sigma_enabled = true
+ecmwf_refresh_interval_secs = 1800
 
 [scanner]
 # How often to refresh the Kalshi market list (seconds).

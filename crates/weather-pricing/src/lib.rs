@@ -94,6 +94,19 @@ pub const SIGMA_SOURCE_STATIC: &str = "static";
 pub const SIGMA_SOURCE_GEFS_ENSEMBLE: &str = "gefs_ensemble";
 pub const SIGMA_SOURCE_ECMWF_ENSEMBLE: &str = "ecmwf_ensemble";
 pub const SIGMA_SOURCE_GEFS_ECMWF_BLEND: &str = "gefs_ecmwf_blend";
+/// Special "source" tag: the threshold was locked by an in-window METAR
+/// observation, so the model probability is derived from a realised
+/// extreme rather than a forecast distribution. `sigma_f` is `0.0` for
+/// these rows — the lock is monotone, so there is no remaining noise
+/// for σ to describe.
+pub const SIGMA_SOURCE_METAR_LOCK: &str = "metar_lock";
+
+/// Probability we stamp on a locked YES — slightly below 1.0 to leave
+/// a sliver of room for late QC revision or a settlement-rule edge case.
+/// Tight enough that the strategy gate trades it aggressively; not 1.0
+/// so the strategy code path stays inside the [0.0, 1.0) numerical band
+/// it already trusts.
+pub const METAR_LOCK_YES_PROBABILITY: f64 = 0.99;
 
 /// Compute a model probability for a single Kalshi weather market.
 ///
@@ -195,6 +208,59 @@ pub fn price_market_with_sigma(
         settlement_station: city.icao,
         sigma_source,
     })
+}
+
+/// Override pricing when the threshold has been *locked* by an in-window
+/// METAR observation. Returns `Some(ModelPricing)` only when the realised
+/// extreme already crossed the strike — the call site falls through to
+/// the ensemble-based pricing otherwise.
+///
+/// Lock conditions (with continuity correction; Kalshi rounds to whole °F):
+///   - `DailyHigh` + `AtOrAbove(T)` → running high ≥ T - 0.5 → YES locked.
+///     CLI reports the day's max, which is monotone increasing; once a
+///     valid observation has crossed T (rounded), the daily max is at
+///     least T regardless of what happens later in the window.
+///   - `DailyLow` + `AtOrBelow(T)` → running low ≤ T + 0.5 → YES locked.
+///     Same monotonicity argument on the daily min.
+///
+/// We deliberately do **not** lock the opposite directions here
+/// (`DailyHigh + AtOrBelow`, `DailyLow + AtOrAbove`). Those are "NO
+/// locks": the YES side is becoming less likely, but you'd need the rest
+/// of the day's forecast to know how much. That's a follow-up — this PR
+/// ships only the high-confidence YES side.
+///
+/// `sigma_f` is set to `0.0` and `sigma_source` to
+/// [`SIGMA_SOURCE_METAR_LOCK`] so backtest splits separate locked rows
+/// from forecast-driven rows. The probability stamped is
+/// [`METAR_LOCK_YES_PROBABILITY`] (slightly under 1.0) — see that
+/// constant for the rationale.
+pub fn price_market_with_lock(
+    threshold: &WeatherThreshold,
+    running_extreme_f: f64,
+) -> Result<Option<ModelPricing>, PricingError> {
+    let city = lookup_city(&threshold.city)
+        .ok_or_else(|| PricingError::UnknownCity(threshold.city.clone()))?;
+    let t = threshold.temperature_f as f64;
+    let locked = match (threshold.stat, threshold.direction) {
+        // "high ≥ T" locks once a valid running high crosses T - 0.5
+        // (Kalshi rounding turns observed 70.0 into reported 70 ≥ 70 ✓).
+        (TempStat::DailyHigh, ThresholdDirection::AtOrAbove) => running_extreme_f >= t - 0.5,
+        // "low ≤ T" locks once a valid running low dips to T + 0.5 or below.
+        (TempStat::DailyLow, ThresholdDirection::AtOrBelow) => running_extreme_f <= t + 0.5,
+        // NO-side locks deferred.
+        _ => false,
+    };
+    if !locked {
+        return Ok(None);
+    }
+    Ok(Some(ModelPricing {
+        yes_probability: Decimal::from_f64(METAR_LOCK_YES_PROBABILITY).unwrap_or(Decimal::ZERO),
+        forecast_temp_f: running_extreme_f.round() as i32,
+        sigma_f: 0.0,
+        horizon_days: 0,
+        settlement_station: city.icao,
+        sigma_source: SIGMA_SOURCE_METAR_LOCK,
+    }))
 }
 
 /// Does forecast period `p` overlap the half-open settlement window?
@@ -438,6 +504,55 @@ mod tests {
             pf_with,
             pf_without
         );
+    }
+
+    fn low_threshold(t: i32, dir: ThresholdDirection) -> WeatherThreshold {
+        WeatherThreshold {
+            city: "NY".into(),
+            stat: TempStat::DailyLow,
+            direction: dir,
+            temperature_f: t,
+            date: NaiveDate::from_ymd_opt(2026, 7, 4).unwrap(),
+        }
+    }
+
+    #[test]
+    fn lock_fires_when_running_high_crosses_at_or_above_strike() {
+        let m = high_threshold(75, ThresholdDirection::AtOrAbove);
+        // running high = 75 → ≥ 75 - 0.5 → locked.
+        let p = price_market_with_lock(&m, 75.0).unwrap().expect("locked");
+        let pf: f64 = p.yes_probability.try_into().unwrap();
+        assert!((pf - METAR_LOCK_YES_PROBABILITY).abs() < 1e-9);
+        assert_eq!(p.sigma_source, "metar_lock");
+        assert_eq!(p.sigma_f, 0.0);
+        assert_eq!(p.settlement_station, "KNYC");
+    }
+
+    #[test]
+    fn lock_does_not_fire_when_running_high_below_strike() {
+        let m = high_threshold(75, ThresholdDirection::AtOrAbove);
+        // running high = 74 → < 75 - 0.5 = 74.5 → not locked.
+        assert!(price_market_with_lock(&m, 74.0).unwrap().is_none());
+    }
+
+    #[test]
+    fn lock_fires_for_daily_low_at_or_below() {
+        let m = low_threshold(60, ThresholdDirection::AtOrBelow);
+        // running low = 60 → ≤ 60 + 0.5 → locked.
+        let p = price_market_with_lock(&m, 60.0).unwrap().expect("locked");
+        assert_eq!(p.sigma_source, "metar_lock");
+    }
+
+    #[test]
+    fn lock_does_not_fire_for_opposite_directions_in_v1() {
+        // DailyHigh + AtOrBelow → "high ≤ T". A running high crossing T+
+        // is a NO-side lock that we explicitly defer; YES-only in v1.
+        let m = high_threshold(75, ThresholdDirection::AtOrBelow);
+        assert!(price_market_with_lock(&m, 90.0).unwrap().is_none());
+        // Symmetrically, DailyLow + AtOrAbove → "low ≥ T". A running low
+        // dipping below T- locks NO; deferred.
+        let m = low_threshold(60, ThresholdDirection::AtOrAbove);
+        assert!(price_market_with_lock(&m, 50.0).unwrap().is_none());
     }
 
     #[test]

@@ -169,6 +169,79 @@ pub fn daily_low_stats(
     daily_extreme_stats(forecast, start, end, false)
 }
 
+/// Pool per-member daily-high extremes from multiple ensembles (e.g.
+/// GEFS + ECMWF IFS) and recompute `(μ, σ)` over the union. Members are
+/// concatenated, so larger ensembles get proportionally more weight in
+/// the blended σ. That's intentional and aligned with the verification
+/// literature where ECMWF EPS dispersion is the more trusted of the two.
+///
+/// Returns `None` if no ensemble produced a single in-window observation
+/// (e.g. all sources past their forecast horizon for `date`). A single
+/// ensemble with `forecasts.len() == 1` produces the same result as
+/// [`daily_high_stats`] on that ensemble.
+pub fn pooled_daily_high_stats(
+    forecasts: &[&EnsembleForecast],
+    city: &CitySpec,
+    date: NaiveDate,
+) -> Option<EnsembleStat> {
+    let (start, end) = daily_high_window_utc(city, date);
+    pooled_daily_extreme_stats(forecasts, start, end, true)
+}
+
+pub fn pooled_daily_low_stats(
+    forecasts: &[&EnsembleForecast],
+    city: &CitySpec,
+    date: NaiveDate,
+) -> Option<EnsembleStat> {
+    let (start, end) = daily_low_window_utc(city, date);
+    pooled_daily_extreme_stats(forecasts, start, end, false)
+}
+
+fn pooled_daily_extreme_stats(
+    forecasts: &[&EnsembleForecast],
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+    take_max: bool,
+) -> Option<EnsembleStat> {
+    let mut per_member_extremes: Vec<f64> = Vec::new();
+    for forecast in forecasts {
+        for member in &forecast.members {
+            let mut extreme: Option<f64> = None;
+            for (i, t) in forecast.times.iter().enumerate() {
+                if *t < window_start || *t >= window_end {
+                    continue;
+                }
+                let Some(temp) = member.get(i).copied().flatten() else {
+                    continue;
+                };
+                extreme = Some(match (extreme, take_max) {
+                    (None, _) => temp,
+                    (Some(prev), true) => prev.max(temp),
+                    (Some(prev), false) => prev.min(temp),
+                });
+            }
+            if let Some(e) = extreme {
+                per_member_extremes.push(e);
+            }
+        }
+    }
+    if per_member_extremes.is_empty() {
+        return None;
+    }
+    let n = per_member_extremes.len();
+    let mu: f64 = per_member_extremes.iter().sum::<f64>() / n as f64;
+    let variance: f64 = per_member_extremes
+        .iter()
+        .map(|x| (x - mu).powi(2))
+        .sum::<f64>()
+        / n as f64;
+    Some(EnsembleStat {
+        mu_f: mu,
+        sigma_f: variance.sqrt(),
+        n_members: n,
+    })
+}
+
 fn daily_extreme_stats(
     forecast: &EnsembleForecast,
     window_start: DateTime<Utc>,
@@ -404,6 +477,42 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2030, 1, 1).unwrap();
         assert!(daily_high_stats(&f, nyc, date).is_none());
         assert!(daily_low_stats(&f, nyc, date).is_none());
+    }
+
+    #[test]
+    fn pooled_stats_with_one_ensemble_matches_single_source() {
+        // Pooling a single ensemble must produce the exact same (μ, σ, n)
+        // as the single-source path — anything else is a math bug.
+        let f = parse_ensemble_json(FIXTURE_24H_3MEMBERS).unwrap();
+        let nyc = lookup_city("NY").expect("NY in cities table");
+        let date = NaiveDate::from_ymd_opt(2026, 7, 4).unwrap();
+        let single = daily_high_stats(&f, nyc, date).unwrap();
+        let pooled = pooled_daily_high_stats(&[&f], nyc, date).unwrap();
+        assert_eq!(single, pooled);
+    }
+
+    #[test]
+    fn pooled_stats_concatenates_members_from_multiple_sources() {
+        // Pooling two copies of the same ensemble must double `n_members`
+        // and keep μ identical; σ stays identical because the per-member
+        // extremes are the same numbers repeated, just twice.
+        let f = parse_ensemble_json(FIXTURE_24H_3MEMBERS).unwrap();
+        let nyc = lookup_city("NY").expect("NY in cities table");
+        let date = NaiveDate::from_ymd_opt(2026, 7, 4).unwrap();
+        let single = daily_high_stats(&f, nyc, date).unwrap();
+        let pooled = pooled_daily_high_stats(&[&f, &f], nyc, date).unwrap();
+        assert_eq!(pooled.n_members, single.n_members * 2);
+        assert!((pooled.mu_f - single.mu_f).abs() < 1e-9);
+        assert!((pooled.sigma_f - single.sigma_f).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pooled_stats_returns_none_when_all_sources_out_of_horizon() {
+        let f = parse_ensemble_json(FIXTURE_24H_3MEMBERS).unwrap();
+        let nyc = lookup_city("NY").expect("NY in cities table");
+        let date = NaiveDate::from_ymd_opt(2030, 1, 1).unwrap();
+        assert!(pooled_daily_high_stats(&[&f, &f], nyc, date).is_none());
+        assert!(pooled_daily_low_stats(&[&f, &f], nyc, date).is_none());
     }
 
     #[test]

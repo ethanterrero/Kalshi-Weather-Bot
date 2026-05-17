@@ -79,11 +79,11 @@ pub struct ModelPricing {
     /// ICAO of the NWS station Kalshi settles on, validated against the
     /// city table. Surfaced so logs show a settlement-source check.
     pub settlement_station: &'static str,
-    /// Where σ came from: `"gefs_ensemble"` when the caller supplied an
-    /// override (typically derived from real ensemble spread), `"static"`
-    /// when the hand-calibrated `sigma_for_horizon` table was used. The
-    /// JSONL backtester splits metrics on this so we can tell whether
-    /// ensemble σ moves the calibration needle.
+    /// Where σ came from. One of [`SIGMA_SOURCE_STATIC`],
+    /// [`SIGMA_SOURCE_GEFS_ENSEMBLE`], [`SIGMA_SOURCE_ECMWF_ENSEMBLE`],
+    /// or [`SIGMA_SOURCE_GEFS_ECMWF_BLEND`] (pooled members from both
+    /// ensembles). The JSONL backtester splits metrics on this so we can
+    /// tell which source moves the calibration needle.
     pub sigma_source: &'static str,
 }
 
@@ -92,6 +92,8 @@ pub struct ModelPricing {
 /// `settlement_station`) — the JSONL layer just stringifies it.
 pub const SIGMA_SOURCE_STATIC: &str = "static";
 pub const SIGMA_SOURCE_GEFS_ENSEMBLE: &str = "gefs_ensemble";
+pub const SIGMA_SOURCE_ECMWF_ENSEMBLE: &str = "ecmwf_ensemble";
+pub const SIGMA_SOURCE_GEFS_ECMWF_BLEND: &str = "gefs_ecmwf_blend";
 
 /// Compute a model probability for a single Kalshi weather market.
 ///
@@ -146,14 +148,15 @@ pub fn price_market(
 /// hand-calibrated `sigma_for_horizon(horizon_days)` table — that's the
 /// historical default, kept for backwards compatibility.
 ///
-/// The override exists so the bot can plug in a per-(city, day) σ
-/// derived from a real ensemble (GEFS / ECMWF) instead of the static
-/// table. Pricing math is otherwise identical: same window selection,
-/// same continuity correction, same period-overlap rule.
+/// The override is a `(sigma_f, source_tag)` tuple: the caller is
+/// authoritative about *which* ensemble (or blend) it computed the σ
+/// from, and the tag flows through to `ModelPricing::sigma_source` and
+/// the JSONL log. Pricing math is otherwise identical: same window
+/// selection, same continuity correction, same period-overlap rule.
 pub fn price_market_with_sigma(
     threshold: &WeatherThreshold,
     forecast: &Forecast,
-    sigma_override: Option<f64>,
+    sigma_override: Option<(f64, &'static str)>,
 ) -> Result<ModelPricing, PricingError> {
     let city = lookup_city(&threshold.city)
         .ok_or_else(|| PricingError::UnknownCity(threshold.city.clone()))?;
@@ -179,7 +182,7 @@ pub fn price_market_with_sigma(
         .num_days()
         .max(0);
     let (sigma_f, sigma_source) = match sigma_override {
-        Some(s) => (s, SIGMA_SOURCE_GEFS_ENSEMBLE),
+        Some((s, tag)) => (s, tag),
         None => (sigma_for_horizon(horizon_days), SIGMA_SOURCE_STATIC),
     };
     let yes_p = yes_probability(chosen.temperature_f, threshold, sigma_f);
@@ -412,7 +415,8 @@ mod tests {
     fn sigma_override_is_used_in_place_of_horizon_table() {
         let f = nyc_july4_forecast(75);
         let m = high_threshold(75, ThresholdDirection::AtOrAbove);
-        let with_override = price_market_with_sigma(&m, &f, Some(4.0)).unwrap();
+        let with_override =
+            price_market_with_sigma(&m, &f, Some((4.0, SIGMA_SOURCE_GEFS_ENSEMBLE))).unwrap();
         let without_override = price_market_with_sigma(&m, &f, None).unwrap();
 
         // Override = 4.0 should be reflected verbatim, regardless of horizon.
@@ -434,6 +438,18 @@ mod tests {
             pf_with,
             pf_without
         );
+    }
+
+    #[test]
+    fn sigma_source_tag_round_trips_from_caller() {
+        let f = nyc_july4_forecast(75);
+        let m = high_threshold(75, ThresholdDirection::AtOrAbove);
+        let blended =
+            price_market_with_sigma(&m, &f, Some((3.0, SIGMA_SOURCE_GEFS_ECMWF_BLEND))).unwrap();
+        let ecmwf =
+            price_market_with_sigma(&m, &f, Some((2.5, SIGMA_SOURCE_ECMWF_ENSEMBLE))).unwrap();
+        assert_eq!(blended.sigma_source, "gefs_ecmwf_blend");
+        assert_eq!(ecmwf.sigma_source, "ecmwf_ensemble");
     }
 
     #[test]

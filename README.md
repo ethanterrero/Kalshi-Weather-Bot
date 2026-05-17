@@ -152,9 +152,22 @@ cargo run --release -p weather-bot
 
 Run from the repo root — config is loaded from `config/default.toml` relative to the working directory.
 
-The bot is **safe by default**: `execution.mode = "dry_run"` and the executor's `never_send=true` kill-switch are *both* on. In this mode the bot scans markets, runs the model, evaluates risk caps, and writes JSONL decisions, but **places no orders**. `paper` mode now runs the same risk/executor handoff and stamps each row with `risk_outcome` + `execution_outcome`; real sends still require explicitly disabling `never_send` in code (`client.allow_real_sends()` in [crates/weather-executor/src/orders.rs](crates/weather-executor/src/orders.rs)).
+The bot defaults to **`execution.mode = "paper"`**. The executor's `never_send=true` static guard short-circuits *before* HTTP in paper mode, so every `Decision::Trade` flows through risk → executor → JSONL with `execution_outcome = "paper_suppressed_never_send"` and `risk_outcome` populated, *without sending an order*. That's the right test bed: it exercises duplicate-intent guard, risk caps, RSA-PSS signing, order request shape, and lifecycle wiring — every code path live trading uses except the actual HTTP call.
 
-For (eventual) live trading: copy `.env.example` → `.env`, set `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH`, point the path at the PEM file Kalshi gave you, set `KALSHI_ENV=prod` and `execution.mode = "live"`. The strategy loop now hands `Decision::Trade` through the executor in `paper` mode; flipping to `live` additionally requires explicitly disabling the executor's `never_send` kill-switch in code (see `client.allow_real_sends()` in [crates/weather-executor/src/orders.rs](crates/weather-executor/src/orders.rs)).
+Force dry-run (no risk, no executor handoff) by setting `EXECUTION__MODE=dry_run`. For live trading: copy `.env.example` → `.env`, set `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` to the PEM file Kalshi gave you, set `KALSHI_ENV=prod` and `execution.mode = "live"`. The executor's `never_send` guard *also* requires an explicit code edit (`client.allow_real_sends()` in [crates/weather-executor/src/orders.rs](crates/weather-executor/src/orders.rs)) — flipping the config alone will still suppress real sends. Two independent flips, by design.
+
+### Operator runbook for paper trading
+
+1. `cargo build --release` — verifies fmt/clippy/test/build are all green for the current branch
+2. Tail `logs/weather-bot.stdout.log` (or the launchd-managed log file) for the startup banner:
+   - `execution = paper` on the startup line
+   - `intraday METAR lock intraday_lock_enabled=true metar_refresh_secs=300`
+   - `ensemble σ sources gefs_enabled=true ecmwf_enabled=true`
+3. Per-pass summary lines should show non-zero `priced` and zero counts for any `*_source_stale` fields. Whenever a market triggers an emission, `exec_paper_suppressed_kill_switch` is the field that increments (sender short-circuited as designed).
+4. Halt with `touch ./KILL` (file kill switch), `WEATHER_BOT_KILL=1` (env kill), or SIGTERM. The bot evaluates these at the top of every pass.
+5. Resume: remove the file / unset the env var. The bot will pick back up on the next pass.
+
+Only flip `client.allow_real_sends()` after a full week of paper rows with no `exec_errors`, no `*_source_stale`, and replay calibration metrics that don't embarrass the model on `sigma_source = "gefs_ecmwf_blend"` and (eventually) `sigma_source = "metar_lock"` rows.
 
 ### The calibration runner
 

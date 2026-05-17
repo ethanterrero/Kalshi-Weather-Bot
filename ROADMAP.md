@@ -155,15 +155,19 @@ ensemble dispersion is where most of the model's edge will come from.
   `sigma_source` on every JSONL row so the backtest can split metrics.
   AWS `noaa-gefs-pds` (rigorous, GRIB2-parsing) path is still open — only
   needed if Open-Meteo rate-limits or we want non-temperature variables.
-- [ ] **ECMWF / Open-Meteo ECMWF.** Open-Meteo's ensemble endpoint
-  supports `models=ecmwf_ifs025` — second source for the same pricing
-  path, blended with GEFS. Fetcher pattern is identical to `GefsClient`;
-  blender is one weighted-σ helper.
-- [ ] **METAR / ASOS observations** for *intra-day* nowcast updates. On
-  settlement day, by the time it's 2pm local the bot can read the running
-  high directly from observations and update P(YES) materially. This is the
-  biggest potential edge for thin late-day markets. NWS exposes
-  `/stations/{ICAO}/observations` directly; no new auth, no new dep.
+- [x] **ECMWF / Open-Meteo ECMWF.** PR #28 added the fetcher (50 perturbed
+  members + 1 control on the same Open-Meteo `/v1/ensemble` shape as GEFS);
+  PR #29 added `pooled_daily_{high,low}_stats` and wires both into pricing
+  as a blended `(μ, σ)` over the union of per-member daily extremes.
+  Output rows stamp `sigma_source = "gefs_ecmwf_blend"` when both sources
+  are warm, falling back to single-source tags when only one is.
+- [x] **METAR / ASOS observations** for *intra-day* nowcast updates. PRs
+  #30 (NWS METAR client, QC-flag-aware running-extreme aggregator, °C → °F
+  at the boundary) and #31 (intraday lock strategy: when a settlement-day
+  market's running daily-high or daily-low has crossed the strike, override
+  pricing to a near-1.0 `metar_lock` value). The NO-side lock (the
+  opposite-direction case) is still open as a follow-up; it needs
+  rest-of-day forecast logic to be meaningful.
 - [ ] **Forecast cache abstraction.** Today `weather-bot::ForecastCache`
   and `EnsembleCache` are two parallel `HashMap<city_code, ...>` stores.
 

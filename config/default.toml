@@ -40,6 +40,14 @@ gefs_refresh_interval_secs = 1800
 # unavailable for a market.
 ecmwf_sigma_enabled = true
 ecmwf_refresh_interval_secs = 1800
+# Intraday "lock" pricing — when a settlement-day market's running
+# daily-high (or daily-low) already crossed the strike, override the
+# model probability to ~0.99 and stamp sigma_source = "metar_lock".
+# Lock is monotone: once a valid in-window observation crosses the
+# strike, CLI will report YES regardless of what the rest of the day
+# does. Refresh cadence matches the api.weather.gov edge cache.
+intraday_lock_enabled = true
+metar_refresh_interval_secs = 300
 
 [scanner]
 # How often to refresh the Kalshi market list (seconds).

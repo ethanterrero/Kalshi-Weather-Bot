@@ -14,16 +14,19 @@ use tracing::{info, warn};
 use weather_config::{AppConfig, ExecutionMode};
 use weather_executor::{KalshiOrderClient, KalshiSigner, OrderRequest};
 use weather_forecast::{
-    pooled_daily_high_stats, pooled_daily_low_stats, EnsembleForecast, GefsClient, NwsClient,
+    pooled_daily_high_stats, pooled_daily_low_stats, running_high_f, running_low_f,
+    EnsembleForecast, GefsClient, MetarClient, MetarObservation, NwsClient,
 };
 use weather_pricing::{
-    price_market_with_sigma, PricingError, SIGMA_SOURCE_ECMWF_ENSEMBLE,
+    price_market_with_lock, price_market_with_sigma, PricingError, SIGMA_SOURCE_ECMWF_ENSEMBLE,
     SIGMA_SOURCE_GEFS_ECMWF_BLEND, SIGMA_SOURCE_GEFS_ENSEMBLE,
 };
 use weather_risk::{RejectReason, RiskDecision, RiskManager};
 use weather_scanner::MarketScanner;
 use weather_strategy::{decide, Decision, FeeModel, NoTradeReason};
-use weather_types::{lookup_city, CitySpec, Forecast, TempStat};
+use weather_types::{
+    daily_high_window_utc, daily_low_window_utc, lookup_city, CitySpec, Forecast, TempStat,
+};
 
 use decision_log::{record_from, DecisionLogger};
 use kill_switch::{evaluate as evaluate_kill_switch, KillState};
@@ -87,6 +90,12 @@ impl EnsembleSource {
         }
     }
 }
+
+/// METAR cache keyed on Kalshi city code. Holds the parsed observation
+/// vector and the timestamp of the fetch (not the latest observation —
+/// the latter is on the `MetarObservation` itself). One entry per city
+/// covers every same-day market for that city.
+type MetarCache = Arc<RwLock<HashMap<String, (Vec<MetarObservation>, DateTime<Utc>)>>>;
 type IntendedTrades = HashMap<TradeIntentKey, DateTime<Utc>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -129,9 +138,11 @@ async fn main() -> Result<()> {
         config.forecast.user_agent.clone(),
     ));
     let gefs = Arc::new(GefsClient::open_meteo());
+    let metar = Arc::new(MetarClient::nws(config.forecast.user_agent.clone()));
     let forecast_cache: ForecastCache = Arc::new(RwLock::new(HashMap::new()));
     let gefs_cache: EnsembleCache = Arc::new(RwLock::new(HashMap::new()));
     let ecmwf_cache: EnsembleCache = Arc::new(RwLock::new(HashMap::new()));
+    let metar_cache: MetarCache = Arc::new(RwLock::new(HashMap::new()));
 
     let decision_logger = Arc::new(DecisionLogger::new(
         config
@@ -184,6 +195,11 @@ async fn main() -> Result<()> {
         ecmwf_refresh_secs = config.forecast.ecmwf_refresh_interval_secs,
         "ensemble σ sources"
     );
+    info!(
+        intraday_lock_enabled = config.forecast.intraday_lock_enabled,
+        metar_refresh_secs = config.forecast.metar_refresh_interval_secs,
+        "intraday METAR lock"
+    );
 
     if cli.once {
         info!("--once: running a single strategy pass then exiting");
@@ -191,9 +207,11 @@ async fn main() -> Result<()> {
             &scanner,
             &nws,
             &gefs,
+            &metar,
             &forecast_cache,
             &gefs_cache,
             &ecmwf_cache,
+            &metar_cache,
             &config,
             &decision_logger,
             &mut risk,
@@ -226,9 +244,11 @@ async fn main() -> Result<()> {
     let cfg_for_strat = config.clone();
     let nws_for_strat = nws.clone();
     let gefs_for_strat = gefs.clone();
+    let metar_for_strat = metar.clone();
     let cache_for_strat = forecast_cache.clone();
     let gefs_for_loop = gefs_cache.clone();
     let ecmwf_for_loop = ecmwf_cache.clone();
+    let metar_for_loop = metar_cache.clone();
     let logger_for_strat = decision_logger.clone();
     tokio::spawn(async move {
         let mut intended_trades: IntendedTrades = HashMap::new();
@@ -241,9 +261,11 @@ async fn main() -> Result<()> {
                 &scanner_for_strat,
                 &nws_for_strat,
                 &gefs_for_strat,
+                &metar_for_strat,
                 &cache_for_strat,
                 &gefs_for_loop,
                 &ecmwf_for_loop,
+                &metar_for_loop,
                 &cfg_for_strat,
                 &logger_for_strat,
                 &mut risk,
@@ -294,9 +316,11 @@ async fn run_one_pass(
     scanner: &MarketScanner,
     nws: &NwsClient,
     gefs: &GefsClient,
+    metar: &MetarClient,
     cache: &ForecastCache,
     gefs_cache: &EnsembleCache,
     ecmwf_cache: &EnsembleCache,
+    metar_cache: &MetarCache,
     cfg: &AppConfig,
     logger: &DecisionLogger,
     risk: &mut RiskManager,
@@ -322,9 +346,11 @@ async fn run_one_pass(
         scanner,
         nws,
         gefs,
+        metar,
         cache,
         gefs_cache,
         ecmwf_cache,
+        metar_cache,
         cfg,
         logger,
         risk,
@@ -341,9 +367,11 @@ async fn run_strategy_pass(
     scanner: &MarketScanner,
     nws: &NwsClient,
     gefs: &GefsClient,
+    metar: &MetarClient,
     cache: &ForecastCache,
     gefs_cache: &EnsembleCache,
     ecmwf_cache: &EnsembleCache,
+    metar_cache: &MetarCache,
     cfg: &AppConfig,
     logger: &DecisionLogger,
     risk: &mut RiskManager,
@@ -374,6 +402,7 @@ async fn run_strategy_pass(
     let refresh_after = Duration::from_secs(cfg.forecast.refresh_interval_secs);
     let gefs_refresh_after = Duration::from_secs(cfg.forecast.gefs_refresh_interval_secs);
     let ecmwf_refresh_after = Duration::from_secs(cfg.forecast.ecmwf_refresh_interval_secs);
+    let metar_refresh_after = Duration::from_secs(cfg.forecast.metar_refresh_interval_secs);
 
     for tracked in snapshot {
         let city_code = &tracked.threshold.city;
@@ -495,17 +524,54 @@ async fn run_strategy_pass(
         )
         .await;
 
-        let pricing = match price_market_with_sigma(&tracked.threshold, &forecast, sigma_override) {
-            Ok(p) => p,
-            Err(PricingError::NoMatchingForecastPeriod) => {
-                // Common case: market is more than 7 days out (NWS horizon).
-                summary.outside_horizon += 1;
-                continue;
+        // Intraday lock check: only meaningful when this market settles
+        // today (in city standard time) and lock is enabled. Refresh
+        // METAR on demand; lock returns Some when the realised running
+        // extreme has already crossed the strike. We test the lock *first*
+        // because once it fires the ensemble σ is irrelevant.
+        let mut lock_pricing: Option<weather_pricing::ModelPricing> = None;
+        if cfg.forecast.intraday_lock_enabled && is_settlement_today(city, &tracked.threshold) {
+            ensure_metar_fresh(metar, metar_cache, city, metar_refresh_after).await;
+            let read = metar_cache.read().await;
+            if let Some((obs, _)) = read.get(city.kalshi_code) {
+                let (start, end) = match tracked.threshold.stat {
+                    TempStat::DailyHigh => daily_high_window_utc(city, tracked.threshold.date),
+                    TempStat::DailyLow => daily_low_window_utc(city, tracked.threshold.date),
+                };
+                let snap = match tracked.threshold.stat {
+                    TempStat::DailyHigh => running_high_f(obs, start, end),
+                    TempStat::DailyLow => running_low_f(obs, start, end),
+                };
+                if let Some(s) = snap {
+                    match price_market_with_lock(&tracked.threshold, s.value_f) {
+                        Ok(Some(p)) => {
+                            lock_pricing = Some(p);
+                            summary.intraday_lock_hits += 1;
+                        }
+                        Ok(None) => {}
+                        // City-mapping error is already gated above; treat
+                        // any failure here as "fall through to ensemble".
+                        Err(_) => {}
+                    }
+                }
             }
-            Err(e) => {
-                warn!(ticker = %tracked.market.ticker, error = %e, "pricing failed");
-                summary.pricing_failed += 1;
-                continue;
+        }
+
+        let pricing = if let Some(p) = lock_pricing {
+            p
+        } else {
+            match price_market_with_sigma(&tracked.threshold, &forecast, sigma_override) {
+                Ok(p) => p,
+                Err(PricingError::NoMatchingForecastPeriod) => {
+                    // Common case: market is more than 7 days out (NWS horizon).
+                    summary.outside_horizon += 1;
+                    continue;
+                }
+                Err(e) => {
+                    warn!(ticker = %tracked.market.ticker, error = %e, "pricing failed");
+                    summary.pricing_failed += 1;
+                    continue;
+                }
             }
         };
         summary.priced += 1;
@@ -644,6 +710,11 @@ struct PassSummary {
     /// stale. Same fallback semantics as `gefs_source_stale` — the
     /// pricing layer pools whichever source is still warm.
     ecmwf_source_stale: usize,
+    /// Markets whose pricing was overridden by an intraday METAR lock.
+    /// These rows stamp `sigma_source = "metar_lock"` and a near-1.0
+    /// model probability — strategy decides whether to actually trade
+    /// based on the market price.
+    intraday_lock_hits: usize,
 }
 
 impl PassSummary {
@@ -709,6 +780,7 @@ impl PassSummary {
             nws_source_stale = self.nws_source_stale,
             gefs_source_stale = self.gefs_source_stale,
             ecmwf_source_stale = self.ecmwf_source_stale,
+            intraday_lock_hits = self.intraday_lock_hits,
             "strategy pass complete"
         );
     }
@@ -779,6 +851,66 @@ async fn ensure_ensemble_fresh(
                 warn!(source = source.label(), city = city.kalshi_code, error = %e, "ensemble fetch failed; falling back to other sources / static σ");
                 false
             }
+        }
+    }
+}
+
+/// Is `now` inside the standard-time settlement window for this market?
+/// True iff the threshold's `date` is "today" in the city's standard
+/// time AND we haven't yet crossed the window-end. The CLI report we
+/// settle against can only reference observations that already happened,
+/// so a future-dated market has nothing to lock against.
+fn is_settlement_today(city: &CitySpec, threshold: &weather_types::WeatherThreshold) -> bool {
+    let (start, end) = match threshold.stat {
+        TempStat::DailyHigh => daily_high_window_utc(city, threshold.date),
+        TempStat::DailyLow => daily_low_window_utc(city, threshold.date),
+    };
+    let now = Utc::now();
+    now >= start && now < end
+}
+
+/// Refresh the cached METAR observations for `city` if the fetch is
+/// missing or older than `refresh_after`. Failures are logged at warn
+/// but don't propagate — the lock path falls through to ensemble
+/// pricing whenever a fresh snapshot isn't available.
+///
+/// Pulls a 24h window ending now; that's enough to cover the
+/// standard-time settlement window for any city (the longest is 24h)
+/// without paginating. NWS doesn't document a rate limit; one request
+/// per city per (>=5min) cache miss is well inside "reasonable use".
+async fn ensure_metar_fresh(
+    metar: &MetarClient,
+    cache: &MetarCache,
+    city: &CitySpec,
+    refresh_after: Duration,
+) {
+    let cached_ts = {
+        let read = cache.read().await;
+        read.get(city.kalshi_code).map(|(_, ts)| *ts)
+    };
+    let needs_refresh = match cached_ts {
+        None => true,
+        Some(ts) => {
+            Utc::now()
+                .signed_duration_since(ts)
+                .to_std()
+                .unwrap_or_default()
+                > refresh_after
+        }
+    };
+    if !needs_refresh {
+        return;
+    }
+    let end = Utc::now();
+    let start = end - chrono::Duration::hours(24);
+    match metar.fetch_observations(city.icao, start, end).await {
+        Ok(obs) => {
+            let mut write = cache.write().await;
+            write.insert(city.kalshi_code.to_string(), (obs, Utc::now()));
+        }
+        Err(e) => {
+            warn!(city = city.kalshi_code, station = city.icao, error = %e,
+                "METAR fetch failed; intraday lock unavailable for this market");
         }
     }
 }

@@ -135,6 +135,19 @@ pub struct ForecastConfig {
     /// new runs every ~6h on the same cadence as GEFS; 1800 = 30 min.
     #[serde(default = "default_ecmwf_refresh_secs")]
     pub ecmwf_refresh_interval_secs: u64,
+    /// Use intraday METAR observations to *lock* YES on settlement-day
+    /// markets whose running daily-high (resp. daily-low) already crossed
+    /// the strike. CLI reports the day's max/min, which is monotone — a
+    /// valid in-window observation past the strike means YES will resolve
+    /// true regardless of what happens later in the day. Default true.
+    #[serde(default = "default_intraday_lock_enabled")]
+    pub intraday_lock_enabled: bool,
+    /// How often to refresh METAR observations (seconds). NWS publishes
+    /// 5-minute SPECI between hourly METARs at major airports; an edge
+    /// `s-maxage=300` cache fronts that. 300 = match the edge cache
+    /// without thrashing.
+    #[serde(default = "default_metar_refresh_secs")]
+    pub metar_refresh_interval_secs: u64,
 }
 
 fn default_nws_lockout_secs() -> u64 {
@@ -155,6 +168,14 @@ fn default_ecmwf_sigma_enabled() -> bool {
 
 fn default_ecmwf_refresh_secs() -> u64 {
     1800
+}
+
+fn default_intraday_lock_enabled() -> bool {
+    true
+}
+
+fn default_metar_refresh_secs() -> u64 {
+    300
 }
 
 #[derive(Debug, Clone, Deserialize)]

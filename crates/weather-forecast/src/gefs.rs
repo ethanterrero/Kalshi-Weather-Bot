@@ -1,9 +1,10 @@
-//! GEFS (NOAA Global Ensemble Forecast System) ensemble fetcher.
+//! Open-Meteo ensemble fetcher (GEFS + ECMWF IFS).
 //!
 //! Replaces the hand-calibrated `sigma_for_horizon` table for in-horizon
 //! days with a real per-(city, day) `(μ, σ)` derived from the spread of
-//! ~30 perturbed ensemble members. This is the single biggest model
-//! upgrade on the roadmap before backtesting.
+//! ensemble members. GEFS contributes ~30 perturbed members, ECMWF IFS
+//! contributes 50; both share the same Open-Meteo response shape so a
+//! single parser handles both.
 //!
 //! Source: Open-Meteo's `/v1/ensemble` endpoint, which already does the
 //! GRIB2 parsing and exposes ensemble members as JSON arrays. This sidesteps
@@ -11,26 +12,37 @@
 //! dependency. AWS Open Data (`noaa-gefs-pds`) is the long-term fallback if
 //! Open-Meteo rate-limits or goes down.
 //!
-//! Verified live shape (KNYC point, 2026-05-04):
+//! Verified live shape (KNYC point, 2026-05-04 / 2026-05-05):
 //!   GET /v1/ensemble?latitude=40.78&longitude=-73.97&hourly=temperature_2m
-//!       &models=gfs05&temperature_unit=fahrenheit&forecast_days=2
+//!       &models={gfs05|ecmwf_ifs025}&temperature_unit=fahrenheit
+//!       &forecast_days=2
 //!   →   {
 //!         "hourly": {
 //!           "time": ["2026-05-04T00:00", ...],
 //!           "temperature_2m":           [55.4, ...],   // control run
 //!           "temperature_2m_member01":  [55.5, ...],
 //!           ...
-//!           "temperature_2m_member30":  [...],
+//!           "temperature_2m_member{30|50}":  [...],
 //!         }
 //!       }
+//!
+//! Member count is `30` for `gfs05` and `50` for `ecmwf_ifs025`. The
+//! parser loops up to 99 and breaks on the first missing key, so a future
+//! model with a different member count is handled without code changes.
 //!
 //! Times are UTC (`utc_offset_seconds: 0` in the response). For Kalshi
 //! settlement windows we cross-reference with `weather-types`'s
 //! standard-time helpers, not Open-Meteo's `timezone` parameter, because
 //! Kalshi settles on standard time year-round (no DST).
+//!
+//! The struct names (`GefsClient`, `GefsError`) predate the second source.
+//! Renaming to `EnsembleClient` / `EnsembleError` is deliberately deferred
+//! to its own search-and-replace PR — see
+//! `docs/research/ecmwf-open-meteo.md`.
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use thiserror::Error;
+use tracing::warn;
 use weather_types::{daily_high_window_utc, daily_low_window_utc, CitySpec};
 
 #[derive(Debug, Error)]
@@ -220,15 +232,46 @@ impl GefsClient {
 
     /// Fetch the GFS-0.5° ensemble for a point. `forecast_days` is capped
     /// at 16 by Open-Meteo; 7 covers everything Kalshi has open today.
+    /// GEFS publishes 30 perturbed members + 1 control.
     pub async fn fetch_gfs05(
         &self,
         lat: f64,
         lon: f64,
         forecast_days: u32,
     ) -> Result<EnsembleForecast, GefsError> {
+        self.fetch_model("gfs05", lat, lon, forecast_days, 30).await
+    }
+
+    /// Fetch the ECMWF IFS-0.25° ensemble for a point. `forecast_days` is
+    /// capped at 15 by Open-Meteo for this model; 7 covers everything Kalshi
+    /// has open today. ECMWF publishes 50 perturbed members + 1 control —
+    /// more members than GEFS, and a tighter 25 km native resolution that
+    /// matters for coastal cities (MIA, LAX) and complex terrain.
+    pub async fn fetch_ecmwf_ifs025(
+        &self,
+        lat: f64,
+        lon: f64,
+        forecast_days: u32,
+    ) -> Result<EnsembleForecast, GefsError> {
+        self.fetch_model("ecmwf_ifs025", lat, lon, forecast_days, 50)
+            .await
+    }
+
+    /// Shared fetch path. `expected_members` is logged as a warning when
+    /// the actual member count differs — a soft signal that Open-Meteo
+    /// changed the model behind our back (a documented event with the
+    /// 2025 ECMWF resolution upgrade).
+    async fn fetch_model(
+        &self,
+        model: &str,
+        lat: f64,
+        lon: f64,
+        forecast_days: u32,
+        expected_members: usize,
+    ) -> Result<EnsembleForecast, GefsError> {
         let url = format!(
-            "{}/v1/ensemble?latitude={}&longitude={}&hourly=temperature_2m&models=gfs05&temperature_unit=fahrenheit&forecast_days={}",
-            self.base_url, lat, lon, forecast_days
+            "{}/v1/ensemble?latitude={}&longitude={}&hourly=temperature_2m&models={}&temperature_unit=fahrenheit&forecast_days={}",
+            self.base_url, lat, lon, model, forecast_days
         );
         let resp = self.http.get(&url).send().await?;
         let status = resp.status();
@@ -244,7 +287,17 @@ impl GefsClient {
         let text = std::str::from_utf8(&bytes).map_err(|e| {
             serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
         })?;
-        parse_ensemble_json(text)
+        let forecast = parse_ensemble_json(text)?;
+        let got = forecast.member_count();
+        if got != expected_members {
+            warn!(
+                model,
+                expected = expected_members,
+                got,
+                "ensemble member count drift — Open-Meteo may have changed the model"
+            );
+        }
+        Ok(forecast)
     }
 }
 
@@ -375,6 +428,26 @@ mod tests {
         assert!(
             f.member_count() >= 20,
             "expected ~30 members, got {}",
+            f.member_count()
+        );
+        assert!(!f.times.is_empty());
+        assert_eq!(f.control.len(), f.times.len());
+        for m in &f.members {
+            assert_eq!(m.len(), f.times.len());
+        }
+    }
+
+    /// Live integration test for ECMWF IFS-0.25°. Same shape contract as
+    /// GEFS; just more members. Skipped by default; run with:
+    ///   `cargo test -p weather-forecast -- --ignored gefs::ecmwf_live`
+    #[tokio::test]
+    #[ignore]
+    async fn ecmwf_live_fetch_knyc_returns_fifty_members() {
+        let client = GefsClient::open_meteo();
+        let f = client.fetch_ecmwf_ifs025(40.78, -73.97, 2).await.unwrap();
+        assert!(
+            f.member_count() >= 40,
+            "expected ~50 members, got {}",
             f.member_count()
         );
         assert!(!f.times.is_empty());

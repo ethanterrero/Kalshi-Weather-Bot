@@ -263,20 +263,34 @@ pub fn metrics(joined: &[JoinedDecision]) -> Metrics {
     }
 }
 
-/// Reduce joined decisions to one per `(ticker, resolution_date)`, keeping
-/// the earliest emission. Calibration aggregated over raw JSONL rows is
-/// dominated by repeated dry-run emissions of the same market (one
-/// opportunity emitted every pass for hours = thousands of rows that all
-/// resolve identically). Dedupe before bucketing to make the histogram
-/// meaningful as model evidence.
+/// Reduce joined decisions to one per `(ticker, resolution_date,
+/// sigma_source)`, keeping the earliest emission. Calibration aggregated
+/// over raw JSONL rows is dominated by repeated dry-run emissions of the
+/// same market (one opportunity emitted every pass for hours = thousands
+/// of rows that all resolve identically). Dedupe before bucketing to make
+/// the histogram meaningful as model evidence.
+///
+/// `sigma_source` is part of the key because a single market-day can be
+/// priced by more than one source over its life: the GEFS-only fallback
+/// while ECMWF data is missing, the pooled `gefs_ecmwf_blend` once both
+/// ensembles are live, and the intraday `metar_lock` override on
+/// settlement day. These are genuinely distinct pricing decisions we want
+/// to evaluate separately — keying on `(ticker, date)` alone would let the
+/// earliest-emitted source (always the fallback, which is available first)
+/// shadow every later source for that market, which is exactly why
+/// `metar_lock` rows never reached the resolved set.
 ///
 /// "Earliest emission" depends on input order. `read_decisions` returns
 /// rows in file order; callers that want strict temporal order should
 /// sort by `row.ts` before calling.
 pub fn dedupe_joined_by_opportunity(joined: &[JoinedDecision]) -> Vec<JoinedDecision> {
-    let mut first_by_key: BTreeMap<(String, NaiveDate), JoinedDecision> = BTreeMap::new();
+    let mut first_by_key: BTreeMap<(String, NaiveDate, String), JoinedDecision> = BTreeMap::new();
     for j in joined {
-        let key = (j.row.ticker.clone(), j.row.resolution_date);
+        let key = (
+            j.row.ticker.clone(),
+            j.row.resolution_date,
+            j.row.sigma_source.clone(),
+        );
         first_by_key.entry(key).or_insert_with(|| j.clone());
     }
     let mut out: Vec<JoinedDecision> = first_by_key.into_values().collect();
@@ -831,6 +845,81 @@ mod tests {
         let d2 = NaiveDate::from_ymd_opt(2026, 7, 5).unwrap();
         let deduped = dedupe_joined_by_opportunity(&[mk(d1), mk(d2)]);
         assert_eq!(deduped.len(), 2);
+    }
+
+    #[test]
+    fn dedupe_joined_by_opportunity_separates_by_sigma_source() {
+        // Same market and resolution date, priced by two sources over its
+        // life: the GEFS fallback first (earlier ts), then the intraday
+        // metar_lock override on settlement day. Both must survive — keying
+        // on (ticker, date) alone would let the earlier GEFS row shadow the
+        // metar_lock row, dropping it from the resolved set entirely.
+        let date = NaiveDate::from_ymd_opt(2026, 7, 4).unwrap();
+        let ticker = "KXHIGHNY-26JUL04-T75";
+        let mk = |ts_offset_secs: i64, source: &str, p: Decimal| {
+            let mut r = row(
+                TempStat::DailyHigh,
+                ThresholdDirection::AtOrAbove,
+                75,
+                date,
+                p,
+                78,
+            );
+            r.ts += chrono::Duration::seconds(ts_offset_secs);
+            r.ticker = ticker.to_string();
+            r.sigma_source = source.to_string();
+            JoinedDecision {
+                row: r,
+                realised_temp_f: 80,
+                realised_yes: true,
+            }
+        };
+        // GEFS emitted first (days before settlement), metar_lock later.
+        let gefs = mk(0, "gefs_ensemble", dec!(0.62));
+        let blend = mk(30, "gefs_ecmwf_blend", dec!(0.66));
+        let lock = mk(60, "metar_lock", dec!(0.99));
+
+        let deduped = dedupe_joined_by_opportunity(&[gefs, blend, lock]);
+        assert_eq!(deduped.len(), 3);
+        let sources: std::collections::BTreeSet<_> = deduped
+            .iter()
+            .map(|j| j.row.sigma_source.as_str())
+            .collect();
+        assert!(sources.contains("metar_lock"));
+        assert!(sources.contains("gefs_ensemble"));
+        assert!(sources.contains("gefs_ecmwf_blend"));
+    }
+
+    #[test]
+    fn dedupe_joined_by_opportunity_still_collapses_within_one_source() {
+        // Repeated dry-run emissions of the same (ticker, date, source)
+        // still collapse to the earliest — the original purpose of the dedup.
+        let date = NaiveDate::from_ymd_opt(2026, 7, 4).unwrap();
+        let mk = |ts_offset_secs: i64, p: Decimal| {
+            let mut r = row(
+                TempStat::DailyHigh,
+                ThresholdDirection::AtOrAbove,
+                75,
+                date,
+                p,
+                78,
+            );
+            r.ts += chrono::Duration::seconds(ts_offset_secs);
+            r.ticker = "KXHIGHNY-26JUL04-T75".to_string();
+            r.sigma_source = "gefs_ecmwf_blend".to_string();
+            JoinedDecision {
+                row: r,
+                realised_temp_f: 80,
+                realised_yes: true,
+            }
+        };
+        let deduped = dedupe_joined_by_opportunity(&[
+            mk(0, dec!(0.62)),
+            mk(60, dec!(0.70)),
+            mk(120, dec!(0.71)),
+        ]);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].row.model_p_yes, dec!(0.62));
     }
 
     #[test]

@@ -456,7 +456,7 @@ fn aggregate_trades(rows: Vec<DecisionRow>) -> Vec<TradeAggregate> {
     }
 
     let mut out: Vec<_> = by_key.into_values().collect();
-    out.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+    out.sort_by_key(|item| std::cmp::Reverse(item.last_seen));
     out
 }
 

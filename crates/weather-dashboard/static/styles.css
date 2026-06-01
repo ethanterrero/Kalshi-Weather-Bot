@@ -1,0 +1,128 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+body {
+  margin: 0;
+  background: #0b1220;
+  color: #e2e8f0;
+}
+
+.page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.muted {
+  margin: 4px 0 0;
+  color: #93a3b8;
+}
+
+button,
+select,
+input {
+  border-radius: 8px;
+  border: 1px solid #2c3a50;
+  background: #131d31;
+  color: #e2e8f0;
+  padding: 8px 10px;
+}
+
+button {
+  cursor: pointer;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 12px;
+  margin: 20px 0;
+}
+
+.card {
+  background: #121c2f;
+  border: 1px solid #22324a;
+  border-radius: 12px;
+  padding: 12px;
+}
+
+.label {
+  color: #93a3b8;
+  font-size: 0.85rem;
+}
+
+.value {
+  margin-top: 6px;
+  font-size: 1.6rem;
+  font-weight: 600;
+}
+
+.toolbar {
+  display: flex;
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.toolbar input {
+  flex: 1;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #101a2d;
+  border: 1px solid #22324a;
+}
+
+th,
+td {
+  border-bottom: 1px solid #1f3048;
+  text-align: left;
+  font-size: 0.85rem;
+  padding: 8px;
+  vertical-align: top;
+}
+
+th {
+  color: #9db0c9;
+  font-weight: 600;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.chip {
+  margin-left: 6px;
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-size: 0.7rem;
+  color: #7dd3fc;
+  border: 1px solid #1d4f64;
+}
+
+.status-closed {
+  color: #fda4af;
+}
+
+.status-held {
+  color: #86efac;
+}
+
+.status-watch {
+  color: #fde68a;
+}

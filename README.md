@@ -156,6 +156,18 @@ The bot defaults to **`execution.mode = "paper"`**. The executor's `never_send=t
 
 Force dry-run (no risk, no executor handoff) by setting `EXECUTION__MODE=dry_run`. For live trading: copy `.env.example` → `.env`, set `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` to the PEM file Kalshi gave you, set `KALSHI_ENV=prod` and `execution.mode = "live"`. The executor's `never_send` guard *also* requires an explicit code edit (`client.allow_real_sends()` in [crates/weather-executor/src/orders.rs](crates/weather-executor/src/orders.rs)) — flipping the config alone will still suppress real sends. Two independent flips, by design.
 
+### Light frontend dashboard
+
+```bash
+cargo run -p weather-dashboard
+```
+
+Then open [http://127.0.0.1:8787](http://127.0.0.1:8787).
+
+The dashboard reads `logs/decisions/*.jsonl`, dedupes repeated emissions into trade opportunities, and lets you track lifecycle status (`held`, `closed`, `watch`) with per-trade notes. Manual status/notes are persisted to `logs/dashboard-trade-journal.json`.
+
+By default it scans the 3 most recent decision-log files for fast refreshes. Increase the window with `--max-files N` when you want deeper history.
+
 ### Operator runbook for paper trading
 
 1. `cargo build --release` — verifies fmt/clippy/test/build are all green for the current branch

@@ -12,6 +12,7 @@ members = [
     "crates/weather-executor",
     "crates/weather-backtest",
     "crates/weather-bot",
+    "crates/weather-dashboard",
 ]
 
 [workspace.dependencies]
@@ -36,3 +37,5 @@ sha2 = "0.10"
 rand = "0.8"
 clap = { version = "4", features = ["derive"] }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+axum = "0.7"
+tower-http = { version = "0.5", features = ["fs", "trace"] }

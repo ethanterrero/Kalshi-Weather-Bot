@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kalshi Weather Bot Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="header">
+        <div>
+          <h1>Kalshi Weather Bot Dashboard</h1>
+          <p class="muted">Track made, held, and closed opportunities from decision logs.</p>
+        </div>
+        <button id="refreshBtn">Refresh</button>
+      </header>
+
+      <section class="cards">
+        <article class="card">
+          <div class="label">Made</div>
+          <div class="value" id="madeCount">-</div>
+        </article>
+        <article class="card">
+          <div class="label">Held</div>
+          <div class="value" id="heldCount">-</div>
+        </article>
+        <article class="card">
+          <div class="label">Closed</div>
+          <div class="value" id="closedCount">-</div>
+        </article>
+        <article class="card">
+          <div class="label">Watch</div>
+          <div class="value" id="watchCount">-</div>
+        </article>
+      </section>
+
+      <section class="toolbar">
+        <input id="searchInput" type="search" placeholder="Search ticker, city, side..." />
+        <select id="statusFilter">
+          <option value="">All statuses</option>
+          <option value="held">Held</option>
+          <option value="closed">Closed</option>
+          <option value="watch">Watch</option>
+        </select>
+      </section>
+
+      <section>
+        <table>
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th>Status</th>
+              <th>Side</th>
+              <th>Resolution</th>
+              <th>Contracts</th>
+              <th>Limit</th>
+              <th>Edge</th>
+              <th>Execution</th>
+              <th>Notes</th>
+              <th>Save</th>
+            </tr>
+          </thead>
+          <tbody id="tradesBody"></tbody>
+        </table>
+      </section>
+    </main>
+
+    <template id="rowTemplate">
+      <tr>
+        <td class="mono ticker"></td>
+        <td>
+          <select class="statusSelect">
+            <option value="held">Held</option>
+            <option value="closed">Closed</option>
+            <option value="watch">Watch</option>
+          </select>
+          <span class="chip sourceChip"></span>
+        </td>
+        <td class="side"></td>
+        <td class="resolution"></td>
+        <td class="contracts"></td>
+        <td class="limit"></td>
+        <td class="edge"></td>
+        <td class="execution"></td>
+        <td>
+          <input class="notesInput" type="text" maxlength="240" placeholder="Notes..." />
+        </td>
+        <td>
+          <button class="saveBtn">Save</button>
+        </td>
+      </tr>
+    </template>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

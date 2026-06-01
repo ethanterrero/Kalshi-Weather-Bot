@@ -73,7 +73,14 @@ min_edge = "0.05"
 # Kelly fraction multiplier. 0.25 = "quarter Kelly" — conservative.
 kelly_fraction = "0.25"
 # Extra margin (dollars per contract) the EV gate requires on top of fees.
-safety_buffer = "0.01"
+# This is a model-error cushion, not a friction charge: the EV calc already
+# pays the entry fee and buys at the ask (so the entry half-spread is baked
+# into net_ev), and v1 holds to settlement so there's no exit-spread leg.
+# Replay calibration shows a systematic ~0.5-0.8F cold bias in the implied
+# temperature, so model_p is mildly overconfident; 2c absorbs that before a
+# live flip without crowding the dominant 5c min_edge gate. Revisit once a
+# Phase 4 bias correction lands.
+safety_buffer = "0.02"
 # Per-series Kalshi fee multiplier. 1.0 matches most weather markets per
 # https://help.kalshi.com/en/articles/13823805-fees.
 fee_multiplier = "1.0"

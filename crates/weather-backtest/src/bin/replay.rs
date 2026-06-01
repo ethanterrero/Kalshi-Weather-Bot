@@ -52,9 +52,13 @@ struct Args {
     #[arg(long)]
     trades_only: bool,
     /// Collapse repeated dry-run emissions to one per
-    /// `(ticker, resolution_date)` before computing outcome metrics.
-    /// Without this, calibration buckets are dominated by markets the
-    /// bot re-emits every pass for hours. Earliest emission wins.
+    /// `(ticker, resolution_date, sigma_source)` before computing outcome
+    /// metrics. Without this, calibration buckets are dominated by markets
+    /// the bot re-emits every pass for hours. Earliest emission wins.
+    /// `sigma_source` is part of the key so a market repriced by a
+    /// different source over its life (e.g. the settlement-day metar_lock
+    /// override) is kept as its own opportunity rather than shadowed by the
+    /// earlier forecast-driven row.
     #[arg(long)]
     by_opportunity: bool,
 }
@@ -500,7 +504,7 @@ mod tests {
         );
         assert_eq!(trades.len(), 2);
 
-        // by_opportunity: same (ticker, date) collapsed.
+        // by_opportunity: same (ticker, date, source) collapsed.
         let opps = apply_outcome_filters(
             &[trade_early.clone(), trade_late.clone(), no_trade.clone()],
             false,

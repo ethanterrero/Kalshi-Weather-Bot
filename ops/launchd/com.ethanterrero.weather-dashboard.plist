@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ethanterrero.weather-dashboard</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/ethanterrero/Desktop/Kalshi-Weather-Bot/target/release/weather-dashboard</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>8787</string>
+        <string>--decisions-dir</string>
+        <string>logs/decisions</string>
+        <string>--max-files</string>
+        <string>14</string>
+    </array>
+
+    <!-- Same working directory as the bot so `logs/decisions` resolves to the
+         exact files the bot writes (decision_log_dir = "logs/decisions"). -->
+    <key>WorkingDirectory</key>
+    <string>/Users/ethanterrero/Desktop/Kalshi-Weather-Bot</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/ethanterrero/Desktop/Kalshi-Weather-Bot/logs/weather-dashboard.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/ethanterrero/Desktop/Kalshi-Weather-Bot/logs/weather-dashboard.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

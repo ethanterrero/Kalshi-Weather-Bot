@@ -37,8 +37,9 @@ struct Args {
     /// File used to persist dashboard notes and status overrides.
     #[arg(long, default_value = "logs/dashboard-trade-journal.json")]
     journal_path: PathBuf,
-    /// Number of most-recent JSONL files to read per refresh.
-    #[arg(long, default_value_t = 3)]
+    /// Number of most-recent (per-day) JSONL files to read per refresh.
+    /// Each file is one UTC day, so the default is ~2 weeks of history.
+    #[arg(long, default_value_t = 14)]
     max_files: usize,
 }
 

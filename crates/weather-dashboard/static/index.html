@@ -90,8 +90,8 @@
       <main class="main">
         <header class="topbar">
           <div>
-            <h1>Overview</h1>
-            <p class="muted">live KPIs · edge curve · recent activity</p>
+            <h1 id="viewTitle">Overview</h1>
+            <p class="muted" id="viewSubtitle">live KPIs · edge curve · recent activity</p>
           </div>
           <div class="topbar-right">
             <span class="chip chip-ghost" id="sigmaChip">σ · blended</span>
@@ -104,6 +104,8 @@
           </div>
         </header>
 
+        <!-- ============ OVERVIEW VIEW ============ -->
+        <div class="view" id="view-overview">
         <!-- latest ticker strip -->
         <div class="latest" id="latestStrip">
           <span class="latest-label">Latest</span>
@@ -184,6 +186,64 @@
           </div>
           <div class="feed" id="feed"></div>
         </section>
+        </div><!-- /view-overview -->
+
+        <!-- ============ DIAGNOSTICS VIEW ============ -->
+        <div class="view" id="view-diagnostics" hidden>
+          <section class="kpis kpis-4" aria-label="Pipeline health">
+            <article class="kpi">
+              <div class="kpi-head"><span class="kpi-label">Decisions scanned</span></div>
+              <div class="kpi-value" id="diagScanned">–</div>
+              <div class="kpi-sub muted">recent JSONL window</div>
+            </article>
+            <article class="kpi">
+              <div class="kpi-head"><span class="kpi-label">Trade rate</span></div>
+              <div class="kpi-value" id="diagTradeRate">–</div>
+              <div class="kpi-sub muted" id="diagTradeRateSub">of all decisions</div>
+            </article>
+            <article class="kpi">
+              <div class="kpi-head"><span class="kpi-label">Last 24h</span></div>
+              <div class="kpi-value" id="diagLast24">–</div>
+              <div class="kpi-sub muted">decisions emitted</div>
+            </article>
+            <article class="kpi">
+              <div class="kpi-head"><span class="kpi-label">Latest decision</span></div>
+              <div class="kpi-value" id="diagLatest">–</div>
+              <div class="kpi-sub muted" id="diagLatestSub">freshness</div>
+            </article>
+          </section>
+
+          <div class="diag-grid">
+            <article class="panel">
+              <div class="panel-head"><div><h2>Decision breakdown</h2><p class="muted">trade vs. no-trade vs. blocked</p></div></div>
+              <div class="barlist" id="diagDecisions"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><div><h2>σ source mix</h2><p class="muted">forecast volatility model used</p></div></div>
+              <div class="barlist" id="diagSigma"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><div><h2>Risk dispositions</h2><p class="muted">approved / adjusted / rejected</p></div></div>
+              <div class="barlist" id="diagRisk"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><div><h2>Execution outcomes</h2><p class="muted">what happened at the executor</p></div></div>
+              <div class="barlist" id="diagExecution"></div>
+            </article>
+            <article class="panel panel-span">
+              <div class="panel-head"><div><h2>Top reasons</h2><p class="muted">most frequent decision rationale</p></div></div>
+              <div class="barlist" id="diagReasons"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><div><h2>Forecast horizon</h2><p class="muted">days to resolution</p></div></div>
+              <div class="barlist" id="diagHorizons"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><div><h2>Markets by city</h2><p class="muted">decision coverage</p></div></div>
+              <div class="barlist" id="diagCities"></div>
+            </article>
+          </div>
+        </div><!-- /view-diagnostics -->
       </main>
     </div>
 

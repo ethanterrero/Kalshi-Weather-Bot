@@ -252,6 +252,9 @@ h2 { font-size: 0.95rem; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
 .latest-link svg { opacity: 0.8; transform: translateY(-1px); }
 .latest-link:hover { text-decoration: underline; }
 
+/* ---------- views ---------- */
+.view[hidden] { display: none; }
+
 /* ---------- KPI cards ---------- */
 .kpis {
   display: grid;
@@ -259,6 +262,7 @@ h2 { font-size: 0.95rem; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
   gap: 12px;
   margin-bottom: 18px;
 }
+.kpis-4 { grid-template-columns: repeat(4, 1fr); }
 .kpi {
   position: relative;
   padding: 15px 16px;
@@ -301,6 +305,35 @@ h2 { font-size: 0.95rem; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
 .chart-area { width: 100%; }
 .chart-area svg { display: block; width: 100%; height: auto; overflow: visible; }
 .chart-empty { color: var(--faint); font-size: 0.82rem; text-align: center; padding: 36px 0; }
+
+/* ---------- diagnostics ---------- */
+.diag-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+.diag-grid .panel { margin-bottom: 0; }
+.panel-span { grid-column: 1 / -1; }
+
+.barlist { display: flex; flex-direction: column; gap: 10px; }
+.bar-row {
+  display: grid;
+  grid-template-columns: 150px 1fr 34px;
+  align-items: center;
+  gap: 12px;
+}
+.bl-label {
+  font-size: 0.8rem;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-transform: capitalize;
+}
+.bl-track { display: block; height: 7px; border-radius: 4px; background: rgba(255, 255, 255, 0.05); overflow: hidden; }
+.bl-fill { display: block; height: 100%; border-radius: 4px; background: var(--accent); transition: width 0.3s ease; }
+.bl-count { font-family: var(--mono); font-size: 0.8rem; text-align: right; color: var(--text); }
+.barlist-empty { color: var(--faint); font-size: 0.8rem; padding: 8px 0; }
 
 /* ---------- toolbar ---------- */
 .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -432,7 +465,10 @@ h2 { font-size: 0.95rem; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
 /* ---------- responsive ---------- */
 @media (max-width: 1100px) {
   .kpis { grid-template-columns: repeat(3, 1fr); }
+  .kpis-4 { grid-template-columns: repeat(2, 1fr); }
   .charts { grid-template-columns: 1fr; }
+  .diag-grid { grid-template-columns: 1fr; }
+  .bar-row { grid-template-columns: 120px 1fr 32px; }
 }
 @media (max-width: 860px) {
   .app { grid-template-columns: 1fr; }

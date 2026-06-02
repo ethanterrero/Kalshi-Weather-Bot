@@ -224,8 +224,8 @@ function renderCurve(trades) {
   // gradient defs
   const defs = svgEl("defs", {});
   const grad = svgEl("linearGradient", { id: "curveFill", x1: 0, y1: 0, x2: 0, y2: 1 });
-  grad.appendChild(svgEl("stop", { offset: "0%", "stop-color": "#38bdf8", "stop-opacity": 0.35 }));
-  grad.appendChild(svgEl("stop", { offset: "100%", "stop-color": "#38bdf8", "stop-opacity": 0 }));
+  grad.appendChild(svgEl("stop", { offset: "0%", "stop-color": "#4f8ff7", "stop-opacity": 0.18 }));
+  grad.appendChild(svgEl("stop", { offset: "100%", "stop-color": "#4f8ff7", "stop-opacity": 0 }));
   defs.appendChild(grad);
   svg.appendChild(defs);
 
@@ -234,12 +234,12 @@ function renderCurve(trades) {
 
   svg.appendChild(svgEl("path", { d: areaPath, fill: "url(#curveFill)" }));
   svg.appendChild(
-    svgEl("path", { d: linePath, fill: "none", stroke: "#38bdf8", "stroke-width": 2.2, "stroke-linejoin": "round", "stroke-linecap": "round" })
+    svgEl("path", { d: linePath, fill: "none", stroke: "#4f8ff7", "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" })
   );
 
   // points
   for (const p of pts) {
-    const c = svgEl("circle", { cx: sx(p.x), cy: sy(p.y), r: 3.2, fill: "#0a0f1c", stroke: "#38bdf8", "stroke-width": 1.8 });
+    const c = svgEl("circle", { cx: sx(p.x), cy: sy(p.y), r: 3, fill: "#0a0b0e", stroke: "#4f8ff7", "stroke-width": 1.6 });
     const title = svgEl("title", {});
     title.textContent = `${p.t.ticker} · ${usd(p.y)} cumulative`;
     c.appendChild(title);
@@ -306,8 +306,8 @@ function renderCityBars(trades) {
 
   const defs = svgEl("defs", {});
   const grad = svgEl("linearGradient", { id: "barFill", x1: 0, y1: 0, x2: 1, y2: 0 });
-  grad.appendChild(svgEl("stop", { offset: "0%", "stop-color": "#1e40af" }));
-  grad.appendChild(svgEl("stop", { offset: "100%", "stop-color": "#38bdf8" }));
+  grad.appendChild(svgEl("stop", { offset: "0%", "stop-color": "#3a6fcf" }));
+  grad.appendChild(svgEl("stop", { offset: "100%", "stop-color": "#4f8ff7" }));
   defs.appendChild(grad);
   svg.appendChild(defs);
 

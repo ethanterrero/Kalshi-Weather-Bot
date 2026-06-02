@@ -306,6 +306,54 @@ h2 { font-size: 0.95rem; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
 .chart-area svg { display: block; width: 100%; height: auto; overflow: visible; }
 .chart-empty { color: var(--faint); font-size: 0.82rem; text-align: center; padding: 36px 0; }
 
+/* ---------- weather map ---------- */
+.map-wrap { position: relative; }
+.map-area svg { display: block; width: 100%; height: auto; }
+.map-land {
+  fill: #18213a;
+  stroke: #33415f;
+  stroke-width: 0.8;
+  stroke-linejoin: round;
+}
+.map-marker { cursor: pointer; transition: fill-opacity 0.15s ease; }
+.map-marker:hover { fill-opacity: 0.9; }
+.map-ring {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.4;
+  opacity: 0.7;
+  animation: mapPulse 2.4s ease-out infinite;
+}
+@keyframes mapPulse {
+  0% { opacity: 0.7; }
+  70% { opacity: 0.1; }
+  100% { opacity: 0.7; }
+}
+.map-tip {
+  position: absolute;
+  pointer-events: none;
+  z-index: 20;
+  min-width: 170px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(12, 14, 20, 0.96);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+.map-tip strong { color: var(--text); font-size: 0.85rem; }
+.map-tip .pos { color: var(--green); }
+.map-tip .neg { color: var(--red); }
+.map-legend { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.lg { display: inline-flex; align-items: center; gap: 6px; font-size: 0.74rem; color: var(--muted); }
+.lg-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.lg-ring { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid var(--accent); display: inline-block; }
+.map-note { margin: 12px 0 0; font-size: 0.74rem; }
+
 /* ---------- diagnostics ---------- */
 .diag-grid {
   display: grid;

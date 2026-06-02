@@ -164,9 +164,19 @@ cargo run -p weather-dashboard
 
 Then open [http://127.0.0.1:8787](http://127.0.0.1:8787).
 
-The dashboard reads `logs/decisions/*.jsonl`, dedupes repeated emissions into trade opportunities, and lets you track lifecycle status (`held`, `closed`, `watch`) with per-trade notes. Manual status/notes are persisted to `logs/dashboard-trade-journal.json`.
+The dashboard reads `logs/decisions/*.jsonl` — **the same directory the bot writes to** (`logging.decision_log_dir = "logs/decisions"`). Run it from the repo root (or with `--decisions-dir`) and it shows the bot's live decision stream with no extra wiring: an Overview (KPIs, expected-P&L curve, recent activity), a Weather Map of traded markets by location, and a Diagnostics view (decision mix, σ sources, risk/execution outcomes, top reasons). It dedupes repeated emissions into trade opportunities and lets you track lifecycle status (`held`, `closed`, `watch`) with per-trade notes, persisted to `logs/dashboard-trade-journal.json`.
 
-By default it scans the 3 most recent decision-log files for fast refreshes. Increase the window with `--max-files N` when you want deeper history.
+By default it scans the 14 most recent per-day decision-log files (~2 weeks). Narrow it with `--max-files N` for faster refreshes, or widen it for deeper history.
+
+**Run it alongside the bot (launchd).** A companion agent keeps the dashboard up on `:8787`, reading the live logs:
+
+```bash
+cargo build --release -p weather-dashboard
+cp ops/launchd/com.ethanterrero.weather-dashboard.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.ethanterrero.weather-dashboard.plist
+```
+
+It uses the same `WorkingDirectory` as `com.ethanterrero.weather-bot.plist`, so both processes share `logs/decisions`. Unload with `launchctl unload ~/Library/LaunchAgents/com.ethanterrero.weather-dashboard.plist`.
 
 ### Operator runbook for paper trading
 
@@ -178,6 +188,7 @@ By default it scans the 3 most recent decision-log files for fast refreshes. Inc
 3. Per-pass summary lines should show non-zero `priced` and zero counts for any `*_source_stale` fields. Whenever a market triggers an emission, `exec_paper_suppressed_kill_switch` is the field that increments (sender short-circuited as designed).
 4. Halt with `touch ./KILL` (file kill switch), `WEATHER_BOT_KILL=1` (env kill), or SIGTERM. The bot evaluates these at the top of every pass.
 5. Resume: remove the file / unset the env var. The bot will pick back up on the next pass.
+6. Watch it live: open the dashboard at [http://127.0.0.1:8787](http://127.0.0.1:8787). The Diagnostics view should show non-zero `paper_submitted` / `dry_run_suppressed` execution outcomes and a healthy decision mix; the Overview "Latest" strip confirms decisions are flowing.
 
 Only flip `client.allow_real_sends()` after a full week of paper rows with no `exec_errors`, no `*_source_stale`, and replay calibration metrics that don't embarrass the model on `sigma_source = "gefs_ecmwf_blend"` and (eventually) `sigma_source = "metar_lock"` rows.
 

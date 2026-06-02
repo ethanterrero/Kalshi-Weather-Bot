@@ -68,6 +68,10 @@
             <span>Activity</span>
             <span class="nav-count" id="navActivityCount">–</span>
           </a>
+          <a class="nav-item" href="#map" data-section="map">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3 3 5v16l6-2 6 2 6-2V3l-6 2-6-2z"/><path d="M9 3v16M15 5v16"/></svg>
+            <span>Weather Map</span>
+          </a>
           <a class="nav-item" href="#diagnostics" data-section="diagnostics">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg>
             <span>Diagnostics</span>
@@ -244,6 +248,51 @@
             </article>
           </div>
         </div><!-- /view-diagnostics -->
+
+        <!-- ============ WEATHER MAP VIEW ============ -->
+        <div class="view" id="view-map" hidden>
+          <section class="kpis kpis-4" aria-label="Geographic coverage">
+            <article class="kpi">
+              <div class="kpi-head"><span class="kpi-label">Cities traded</span></div>
+              <div class="kpi-value" id="mapCities">–</div>
+              <div class="kpi-sub muted" id="mapCitiesSub">on the map</div>
+            </article>
+            <article class="kpi">
+              <div class="kpi-head"><span class="kpi-label">Top market</span></div>
+              <div class="kpi-value" id="mapTopCity">–</div>
+              <div class="kpi-sub muted" id="mapTopCitySub">most trades</div>
+            </article>
+            <article class="kpi">
+              <div class="kpi-head"><span class="kpi-label">Warmest edge</span></div>
+              <div class="kpi-value" id="mapBestEdge">–</div>
+              <div class="kpi-sub muted" id="mapBestEdgeSub">highest avg edge</div>
+            </article>
+            <article class="kpi kpi-accent">
+              <div class="kpi-head"><span class="kpi-label">Net exp. P&amp;L</span></div>
+              <div class="kpi-value" id="mapNetPnl">–</div>
+              <div class="kpi-sub muted">across mapped cities</div>
+            </article>
+          </section>
+
+          <article class="panel">
+            <div class="panel-head panel-head-stack">
+              <div>
+                <h2>Markets by location</h2>
+                <p class="muted">bubble size = trade count · color = expected P&amp;L</p>
+              </div>
+              <div class="map-legend">
+                <span class="lg"><span class="lg-dot" style="background:var(--green)"></span>profitable</span>
+                <span class="lg"><span class="lg-dot" style="background:var(--red)"></span>unprofitable</span>
+                <span class="lg"><span class="lg-ring"></span>open position</span>
+              </div>
+            </div>
+            <div class="map-wrap">
+              <div class="map-area" id="mapArea"></div>
+              <div class="map-tip" id="mapTip" hidden></div>
+            </div>
+            <p class="muted map-note" id="mapNote"></p>
+          </article>
+        </div><!-- /view-map -->
       </main>
     </div>
 
@@ -286,6 +335,7 @@
       </article>
     </template>
 
+    <script src="/map-data.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

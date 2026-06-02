@@ -54,12 +54,24 @@ const els = {
   diagReasons: document.getElementById("diagReasons"),
   diagHorizons: document.getElementById("diagHorizons"),
   diagCities: document.getElementById("diagCities"),
+  // weather map
+  mapArea: document.getElementById("mapArea"),
+  mapTip: document.getElementById("mapTip"),
+  mapCities: document.getElementById("mapCities"),
+  mapCitiesSub: document.getElementById("mapCitiesSub"),
+  mapTopCity: document.getElementById("mapTopCity"),
+  mapTopCitySub: document.getElementById("mapTopCitySub"),
+  mapBestEdge: document.getElementById("mapBestEdge"),
+  mapBestEdgeSub: document.getElementById("mapBestEdgeSub"),
+  mapNetPnl: document.getElementById("mapNetPnl"),
+  mapNote: document.getElementById("mapNote"),
 };
 
 const VIEWS = {
   overview: { title: "Overview", subtitle: "live KPIs · edge curve · recent activity", el: "view-overview" },
   trades: { title: "Trades", subtitle: "all logged opportunities", el: "view-overview", scrollTo: "activity" },
   activity: { title: "Activity", subtitle: "recent decision stream", el: "view-overview", scrollTo: "activity" },
+  map: { title: "Weather Map", subtitle: "traded markets by location · edge & activity", el: "view-map", map: true },
   diagnostics: { title: "Diagnostics", subtitle: "pipeline health · decision mix · risk", el: "view-diagnostics", diag: true },
 };
 let activeView = "overview";
@@ -463,6 +475,111 @@ function renderFeed() {
   els.feed.appendChild(frag);
 }
 
+/* ---------- weather map ---------- */
+// Project a city name to [x, y] in the map's viewBox via the equirectangular
+// bounds in MAP_VIEW (from map-data.js). Returns null for unknown cities.
+function projCity(name) {
+  const c = typeof CITY_COORDS !== "undefined" && CITY_COORDS[String(name || "").toLowerCase()];
+  if (!c) return null;
+  const { w, h, W, E, N, S } = MAP_VIEW;
+  return [((c[1] - W) / (E - W)) * w, ((N - c[0]) / (N - S)) * h];
+}
+
+function computeCityStats(trades) {
+  const m = new Map();
+  for (const t of trades) {
+    let s = m.get(t.city);
+    if (!s) {
+      s = { city: t.city, count: 0, contracts: 0, netEv: 0, edgeSum: 0, edgeN: 0, modelSum: 0, modelN: 0, held: 0, latest: t.last_seen };
+      m.set(t.city, s);
+    }
+    s.count++;
+    const ct = Number(t.contracts) || 0;
+    s.contracts += ct;
+    if (t.net_ev_per_contract != null) s.netEv += Number(t.net_ev_per_contract) * ct;
+    if (t.raw_edge != null) { s.edgeSum += Number(t.raw_edge); s.edgeN++; }
+    if (t.model_p_yes != null) { s.modelSum += Number(t.model_p_yes); s.modelN++; }
+    if (t.status === "held") s.held++;
+    if (new Date(t.last_seen) > new Date(s.latest)) s.latest = t.last_seen;
+  }
+  const arr = [...m.values()].map((s) => ({
+    ...s,
+    avgEdge: s.edgeN ? s.edgeSum / s.edgeN : null,
+    avgModel: s.modelN ? s.modelSum / s.modelN : null,
+    xy: projCity(s.city),
+  }));
+  arr.sort((a, b) => b.count - a.count);
+  return arr;
+}
+
+function renderMap() {
+  if (typeof US_PATH === "undefined") return; // map-data.js not loaded
+  const stats = computeCityStats(state.trades);
+  const mapped = stats.filter((s) => s.xy);
+  const unmapped = stats.filter((s) => !s.xy);
+
+  // KPIs
+  els.mapCities.textContent = mapped.length;
+  els.mapCitiesSub.textContent = `${stats.length} traded total`;
+  if (mapped.length) {
+    els.mapTopCity.textContent = mapped[0].city;
+    els.mapTopCitySub.textContent = `${mapped[0].count} trade${mapped[0].count === 1 ? "" : "s"}`;
+    const best = mapped.reduce((a, b) => ((b.avgEdge ?? -1) > (a.avgEdge ?? -1) ? b : a));
+    els.mapBestEdge.textContent = best.avgEdge != null ? `${signedPts(best.avgEdge)}` : "–";
+    els.mapBestEdgeSub.textContent = best.city;
+  } else {
+    els.mapTopCity.textContent = "–";
+    els.mapBestEdge.textContent = "–";
+  }
+  const netPnl = mapped.reduce((sum, s) => sum + s.netEv, 0);
+  els.mapNetPnl.textContent = usd(netPnl);
+  els.mapNetPnl.classList.toggle("pos", netPnl > 0);
+  els.mapNetPnl.classList.toggle("neg", netPnl < 0);
+
+  els.mapNote.textContent = unmapped.length
+    ? `${unmapped.length} city${unmapped.length === 1 ? "" : "(s)"} without map coordinates: ${unmapped.map((s) => s.city).join(", ")}`
+    : "";
+
+  // SVG
+  const maxCount = Math.max(...mapped.map((s) => s.count), 1);
+  const markers = mapped
+    .map((s, i) => {
+      const [x, y] = s.xy;
+      const r = (6 + (s.count / maxCount) * 13).toFixed(1);
+      const color = s.netEv >= 0 ? "var(--green)" : "var(--red)";
+      const ring = s.held > 0 ? `<circle cx="${x}" cy="${y}" r="${(+r + 5).toFixed(1)}" class="map-ring" />` : "";
+      return `${ring}<circle class="map-marker" data-i="${i}" cx="${x}" cy="${y}" r="${r}" fill="${color}" fill-opacity="0.6" stroke="${color}" stroke-width="1.6" />`;
+    })
+    .join("");
+
+  els.mapArea.innerHTML =
+    `<svg viewBox="0 0 ${MAP_VIEW.w} ${MAP_VIEW.h}" role="img" aria-label="US map of traded markets">` +
+    `<path d="${US_PATH}" class="map-land" />${markers}</svg>`;
+
+  // tooltip
+  const wrap = els.mapTip.parentElement;
+  const showTip = (i, e) => {
+    const s = mapped[i];
+    els.mapTip.hidden = false;
+    els.mapTip.innerHTML =
+      `<strong>${escapeHtml(s.city)}</strong>` +
+      `<span>${s.count} trade${s.count === 1 ? "" : "s"} · ${s.contracts} contracts${s.held ? ` · ${s.held} open` : ""}</span>` +
+      `<span>avg edge ${signedPts(s.avgEdge)} · model ${pct(s.avgModel)}</span>` +
+      `<span class="${s.netEv >= 0 ? "pos" : "neg"}">exp P&L ${usd(s.netEv)}</span>`;
+    const rect = wrap.getBoundingClientRect();
+    let x = e.clientX - rect.left + 16;
+    let y = e.clientY - rect.top + 16;
+    x = Math.min(x, rect.width - 190);
+    els.mapTip.style.left = `${Math.max(8, x)}px`;
+    els.mapTip.style.top = `${Math.max(8, y)}px`;
+  };
+  els.mapArea.querySelectorAll(".map-marker").forEach((el) => {
+    el.addEventListener("mouseenter", (e) => showTip(+el.dataset.i, e));
+    el.addEventListener("mousemove", (e) => showTip(+el.dataset.i, e));
+    el.addEventListener("mouseleave", () => { els.mapTip.hidden = true; });
+  });
+}
+
 /* ---------- diagnostics ---------- */
 const prettyKey = (k) => String(k || "").replace(/_/g, " ");
 
@@ -556,6 +673,7 @@ async function refresh() {
     state.trades = trades;
     renderAll();
     if (activeView === "diagnostics") refreshDiagnostics();
+    if (activeView === "map") renderMap();
   } catch (err) {
     console.error(err);
     setOnline(false);
@@ -605,6 +723,7 @@ function switchView(section) {
   els.viewSubtitle.textContent = cfg.subtitle;
 
   if (cfg.diag) refreshDiagnostics();
+  if (cfg.map) renderMap();
   if (cfg.scrollTo) {
     const target = document.getElementById(cfg.scrollTo);
     if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });

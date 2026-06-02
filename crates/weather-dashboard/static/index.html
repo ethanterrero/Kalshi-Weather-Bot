@@ -3,93 +3,204 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Kalshi Weather Bot Dashboard</title>
+    <title>Kalshi Weather Bot · Live Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@300;400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <main class="page">
-      <header class="header">
-        <div>
-          <h1>Kalshi Weather Bot Dashboard</h1>
-          <p class="muted">Track made, held, and closed opportunities from decision logs.</p>
+    <div class="app">
+      <!-- ============ SIDEBAR ============ -->
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="8" cy="8" r="3.2" />
+              <path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1" />
+              <path d="M11 17.5a3.5 3.5 0 0 1 6.9-.9 3 3 0 0 1-.4 5.9H10a3 3 0 0 1 1-5z" fill="currentColor" stroke="none" opacity="0.9" />
+            </svg>
+          </span>
+          <div class="brand-text">
+            <strong>Kalshi Weather</strong>
+            <span class="muted">live dashboard</span>
+          </div>
         </div>
-        <button id="refreshBtn">Refresh</button>
-      </header>
 
-      <section class="cards">
-        <article class="card">
-          <div class="label">Made</div>
-          <div class="value" id="madeCount">-</div>
-        </article>
-        <article class="card">
-          <div class="label">Held</div>
-          <div class="value" id="heldCount">-</div>
-        </article>
-        <article class="card">
-          <div class="label">Closed</div>
-          <div class="value" id="closedCount">-</div>
-        </article>
-        <article class="card">
-          <div class="label">Watch</div>
-          <div class="value" id="watchCount">-</div>
-        </article>
-      </section>
+        <nav class="nav" aria-label="Primary">
+          <a class="nav-item is-active" href="#overview" data-section="overview">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
+            <span>Overview</span>
+          </a>
+          <a class="nav-item" href="#trades" data-section="trades">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-5 4 3 7-8"/><path d="M16 4h5v5"/></svg>
+            <span>Trades</span>
+            <span class="nav-count" id="navTradesCount">–</span>
+          </a>
+          <a class="nav-item" href="#activity" data-section="activity">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2 6 4-14 2 8h6"/></svg>
+            <span>Activity</span>
+            <span class="nav-count" id="navActivityCount">–</span>
+          </a>
+          <a class="nav-item" href="#diagnostics" data-section="diagnostics">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg>
+            <span>Diagnostics</span>
+          </a>
+        </nav>
 
-      <section class="toolbar">
-        <input id="searchInput" type="search" placeholder="Search ticker, city, side..." />
-        <select id="statusFilter">
-          <option value="">All statuses</option>
-          <option value="held">Held</option>
-          <option value="closed">Closed</option>
-          <option value="watch">Watch</option>
-        </select>
-      </section>
+        <div class="sidebar-foot">
+          <div class="mode-pill">
+            <span class="dot dot-amber"></span>
+            <div>
+              <strong>Paper mode</strong>
+              <span class="muted">no live orders</span>
+            </div>
+          </div>
+          <p class="build muted" id="buildStamp">supabase-free · JSONL</p>
+        </div>
+      </aside>
 
-      <section>
-        <table>
-          <thead>
-            <tr>
-              <th>Ticker</th>
-              <th>Status</th>
-              <th>Side</th>
-              <th>Resolution</th>
-              <th>Contracts</th>
-              <th>Limit</th>
-              <th>Edge</th>
-              <th>Execution</th>
-              <th>Notes</th>
-              <th>Save</th>
-            </tr>
-          </thead>
-          <tbody id="tradesBody"></tbody>
-        </table>
-      </section>
-    </main>
+      <!-- ============ MAIN ============ -->
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <h1>Overview</h1>
+            <p class="muted">live KPIs · edge curve · recent activity</p>
+          </div>
+          <div class="topbar-right">
+            <span class="chip chip-ghost" id="sigmaChip">σ · blended</span>
+            <span class="chip chip-amber">Paper</span>
+            <span class="chip chip-live" id="statusChip"><span class="dot dot-green pulse"></span>Online</span>
+            <button class="btn" id="refreshBtn" type="button">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v5h-5"/></svg>
+              Refresh
+            </button>
+          </div>
+        </header>
 
+        <!-- latest ticker strip -->
+        <div class="latest" id="latestStrip">
+          <span class="latest-label">Latest</span>
+          <div class="latest-body muted" id="latestBody">Loading latest decision…</div>
+        </div>
+
+        <!-- KPI cards -->
+        <section class="kpis" id="kpis" aria-label="Key metrics">
+          <article class="kpi">
+            <div class="kpi-head"><span class="kpi-label">Trades Made</span><span class="kpi-ico" data-ico="made"></span></div>
+            <div class="kpi-value" id="kpiMade">–</div>
+            <div class="kpi-sub muted" id="kpiMadeSub">unique opportunities</div>
+          </article>
+          <article class="kpi">
+            <div class="kpi-head"><span class="kpi-label">Held</span><span class="kpi-ico" data-ico="held"></span></div>
+            <div class="kpi-value" id="kpiHeld">–</div>
+            <div class="kpi-sub muted">open · unresolved</div>
+          </article>
+          <article class="kpi">
+            <div class="kpi-head"><span class="kpi-label">Closed</span><span class="kpi-ico" data-ico="closed"></span></div>
+            <div class="kpi-value" id="kpiClosed">–</div>
+            <div class="kpi-sub muted">resolved markets</div>
+          </article>
+          <article class="kpi">
+            <div class="kpi-head"><span class="kpi-label">Exposure</span><span class="kpi-ico" data-ico="exposure"></span></div>
+            <div class="kpi-value" id="kpiExposure">–</div>
+            <div class="kpi-sub muted" id="kpiExposureSub">contracts × limit</div>
+          </article>
+          <article class="kpi kpi-accent">
+            <div class="kpi-head"><span class="kpi-label">Expected P&amp;L</span><span class="kpi-ico" data-ico="pnl"></span></div>
+            <div class="kpi-value" id="kpiPnl">–</div>
+            <div class="kpi-sub muted">Σ net EV × contracts</div>
+          </article>
+        </section>
+
+        <!-- charts -->
+        <section class="charts">
+          <article class="panel panel-wide">
+            <div class="panel-head">
+              <div>
+                <h2>Expected P&amp;L curve</h2>
+                <p class="muted">cumulative net EV across decisions</p>
+              </div>
+              <span class="panel-tag" id="curveTag">– pts</span>
+            </div>
+            <div class="chart-area" id="curveChart"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Trades by city</h2>
+                <p class="muted" id="cityTotal">– markets</p>
+              </div>
+            </div>
+            <div class="chart-area" id="cityChart"></div>
+          </article>
+        </section>
+
+        <!-- recent activity -->
+        <section class="panel" id="activity">
+          <div class="panel-head panel-head-stack">
+            <div>
+              <h2>Recent activity</h2>
+              <p class="muted" id="activityCount">– events</p>
+            </div>
+            <div class="toolbar">
+              <div class="search">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
+                <input id="searchInput" type="search" placeholder="Search ticker, city, side…" />
+              </div>
+              <div class="segmented" id="statusFilter" role="tablist">
+                <button class="seg is-active" data-status="">All</button>
+                <button class="seg" data-status="held">Held</button>
+                <button class="seg" data-status="closed">Closed</button>
+                <button class="seg" data-status="watch">Watch</button>
+              </div>
+            </div>
+          </div>
+          <div class="feed" id="feed"></div>
+        </section>
+      </main>
+    </div>
+
+    <!-- activity row template -->
     <template id="rowTemplate">
-      <tr>
-        <td class="mono ticker"></td>
-        <td>
-          <select class="statusSelect">
-            <option value="held">Held</option>
-            <option value="closed">Closed</option>
-            <option value="watch">Watch</option>
-          </select>
-          <span class="chip sourceChip"></span>
-        </td>
-        <td class="side"></td>
-        <td class="resolution"></td>
-        <td class="contracts"></td>
-        <td class="limit"></td>
-        <td class="edge"></td>
-        <td class="execution"></td>
-        <td>
-          <input class="notesInput" type="text" maxlength="240" placeholder="Notes..." />
-        </td>
-        <td>
-          <button class="saveBtn">Save</button>
-        </td>
-      </tr>
+      <article class="trade" tabindex="0">
+        <div class="trade-main">
+          <span class="side-badge"></span>
+          <div class="trade-id">
+            <span class="ticker mono"></span>
+            <span class="trade-meta muted"></span>
+          </div>
+        </div>
+        <div class="trade-stats">
+          <div class="stat"><span class="stat-k">model</span><span class="stat-v mono prob-model"></span></div>
+          <div class="stat"><span class="stat-k">market</span><span class="stat-v mono prob-mkt"></span></div>
+          <div class="stat"><span class="stat-k">edge</span><span class="stat-v mono edge"></span></div>
+          <div class="stat"><span class="stat-k">size</span><span class="stat-v mono size"></span></div>
+          <div class="stat"><span class="stat-k">EV/ct</span><span class="stat-v mono ev"></span></div>
+        </div>
+        <div class="trade-side">
+          <span class="status-chip"></span>
+          <button class="link-btn editToggle" type="button">Edit</button>
+        </div>
+        <div class="trade-edit" hidden>
+          <label class="field">
+            <span class="muted">Status</span>
+            <select class="statusSelect">
+              <option value="held">Held</option>
+              <option value="closed">Closed</option>
+              <option value="watch">Watch</option>
+            </select>
+          </label>
+          <label class="field field-grow">
+            <span class="muted">Notes</span>
+            <input class="notesInput" type="text" maxlength="240" placeholder="Add a note…" />
+          </label>
+          <button class="btn btn-sm saveBtn" type="button">Save</button>
+        </div>
+      </article>
     </template>
 
     <script src="/app.js" defer></script>

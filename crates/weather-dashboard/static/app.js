@@ -38,7 +38,31 @@ const els = {
   searchInput: document.getElementById("searchInput"),
   statusFilter: document.getElementById("statusFilter"),
   rowTemplate: document.getElementById("rowTemplate"),
+  viewTitle: document.getElementById("viewTitle"),
+  viewSubtitle: document.getElementById("viewSubtitle"),
+  // diagnostics
+  diagScanned: document.getElementById("diagScanned"),
+  diagTradeRate: document.getElementById("diagTradeRate"),
+  diagTradeRateSub: document.getElementById("diagTradeRateSub"),
+  diagLast24: document.getElementById("diagLast24"),
+  diagLatest: document.getElementById("diagLatest"),
+  diagLatestSub: document.getElementById("diagLatestSub"),
+  diagDecisions: document.getElementById("diagDecisions"),
+  diagSigma: document.getElementById("diagSigma"),
+  diagRisk: document.getElementById("diagRisk"),
+  diagExecution: document.getElementById("diagExecution"),
+  diagReasons: document.getElementById("diagReasons"),
+  diagHorizons: document.getElementById("diagHorizons"),
+  diagCities: document.getElementById("diagCities"),
 };
+
+const VIEWS = {
+  overview: { title: "Overview", subtitle: "live KPIs · edge curve · recent activity", el: "view-overview" },
+  trades: { title: "Trades", subtitle: "all logged opportunities", el: "view-overview", scrollTo: "activity" },
+  activity: { title: "Activity", subtitle: "recent decision stream", el: "view-overview", scrollTo: "activity" },
+  diagnostics: { title: "Diagnostics", subtitle: "pipeline health · decision mix · risk", el: "view-diagnostics", diag: true },
+};
+let activeView = "overview";
 
 const state = {
   trades: [],
@@ -439,6 +463,81 @@ function renderFeed() {
   els.feed.appendChild(frag);
 }
 
+/* ---------- diagnostics ---------- */
+const prettyKey = (k) => String(k || "").replace(/_/g, " ");
+
+function decisionColor(key) {
+  if (key === "trade") return "var(--green)";
+  if (key === "blocked") return "var(--red)";
+  return "var(--muted)";
+}
+function riskColor(key) {
+  if (key.startsWith("reject")) return "var(--red)";
+  if (key.startsWith("adjust")) return "var(--amber)";
+  if (key === "approved") return "var(--green)";
+  return "var(--accent)";
+}
+function execColor(key) {
+  if (key.includes("suppress") || key.includes("dry")) return "var(--amber)";
+  if (key.includes("submit") || key.includes("fill")) return "var(--green)";
+  return "var(--accent)";
+}
+
+function renderBarList(host, items, colorFn) {
+  host.innerHTML = "";
+  if (!items || !items.length) {
+    host.innerHTML = '<div class="barlist-empty">No data in window</div>';
+    return;
+  }
+  const max = Math.max(...items.map((i) => i.count));
+  for (const it of items) {
+    const pct = max ? Math.max(4, (it.count / max) * 100) : 0;
+    const color = colorFn ? colorFn(it.key) : "var(--accent)";
+    const row = document.createElement("div");
+    row.className = "bar-row";
+    row.innerHTML =
+      `<span class="bl-label" title="${escapeHtml(it.key)}">${escapeHtml(prettyKey(it.key))}</span>` +
+      `<span class="bl-track"><span class="bl-fill" style="width:${pct}%;background:${color}"></span></span>` +
+      `<span class="bl-count">${it.count}</span>`;
+    host.appendChild(row);
+  }
+}
+
+function renderDiagnostics(d) {
+  els.diagScanned.textContent = d.scanned_rows;
+  const tradeCount = (d.decisions.find((x) => x.key === "trade") || {}).count || 0;
+  const rate = d.scanned_rows ? Math.round((tradeCount / d.scanned_rows) * 100) : 0;
+  els.diagTradeRate.textContent = `${rate}%`;
+  els.diagTradeRateSub.textContent = `${tradeCount} of ${d.scanned_rows} decisions`;
+  els.diagLast24.textContent = d.decisions_last_24h;
+
+  if (d.latest_decision_at) {
+    els.diagLatest.textContent = timeAgo(d.latest_decision_at);
+    els.diagLatestSub.textContent = new Date(d.latest_decision_at).toLocaleString();
+  } else {
+    els.diagLatest.textContent = "–";
+    els.diagLatestSub.textContent = "no decisions";
+  }
+
+  renderBarList(els.diagDecisions, d.decisions, decisionColor);
+  renderBarList(els.diagSigma, d.sigma_sources);
+  renderBarList(els.diagRisk, d.risk_outcomes, riskColor);
+  renderBarList(els.diagExecution, d.execution_outcomes, execColor);
+  renderBarList(els.diagReasons, d.top_reasons);
+  renderBarList(els.diagHorizons, d.horizons);
+  renderBarList(els.diagCities, d.cities);
+}
+
+async function refreshDiagnostics() {
+  try {
+    const res = await fetch("/api/diagnostics");
+    if (!res.ok) throw new Error(`diagnostics ${res.status}`);
+    renderDiagnostics(await res.json());
+  } catch (err) {
+    console.error(err);
+  }
+}
+
 /* ---------- orchestration ---------- */
 function renderAll() {
   const k = computeKpis(state.trades);
@@ -456,6 +555,7 @@ async function refresh() {
     const [trades] = await Promise.all([fetchAll(), pingHealth()]);
     state.trades = trades;
     renderAll();
+    if (activeView === "diagnostics") refreshDiagnostics();
   } catch (err) {
     console.error(err);
     setOnline(false);
@@ -490,13 +590,39 @@ els.statusFilter.addEventListener("click", (e) => {
   renderFeed();
 });
 
-// sidebar nav scroll (single page — anchors to sections)
+// sidebar nav — switch between Overview and Diagnostics views
+function switchView(section) {
+  const cfg = VIEWS[section] || VIEWS.overview;
+  activeView = section;
+
+  document.querySelectorAll(".nav-item").forEach((n) =>
+    n.classList.toggle("is-active", n.dataset.section === section)
+  );
+  document.querySelectorAll(".view").forEach((v) => {
+    v.hidden = v.id !== cfg.el;
+  });
+  els.viewTitle.textContent = cfg.title;
+  els.viewSubtitle.textContent = cfg.subtitle;
+
+  if (cfg.diag) refreshDiagnostics();
+  if (cfg.scrollTo) {
+    const target = document.getElementById(cfg.scrollTo);
+    if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+  } else {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+}
+
 document.querySelectorAll(".nav-item").forEach((item) => {
-  item.addEventListener("click", () => {
-    document.querySelectorAll(".nav-item").forEach((n) => n.classList.remove("is-active"));
-    item.classList.add("is-active");
+  item.addEventListener("click", (e) => {
+    e.preventDefault();
+    switchView(item.dataset.section || "overview");
   });
 });
+
+// open the view named in the URL hash (e.g. #diagnostics) on load
+const initialView = (location.hash || "").replace("#", "");
+if (VIEWS[initialView]) switchView(initialView);
 
 injectKpiIcons();
 refresh();

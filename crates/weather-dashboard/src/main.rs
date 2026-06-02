@@ -88,6 +88,30 @@ struct DashboardResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct CountItem {
+    key: String,
+    count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DiagnosticsResponse {
+    generated_at: DateTime<Utc>,
+    /// Total decision rows scanned across the recent JSONL window.
+    scanned_rows: usize,
+    /// Timestamp of the most recent decision (None when no rows).
+    latest_decision_at: Option<DateTime<Utc>>,
+    /// Rows emitted in the last 24h — a quick freshness gauge.
+    decisions_last_24h: usize,
+    decisions: Vec<CountItem>,
+    sigma_sources: Vec<CountItem>,
+    risk_outcomes: Vec<CountItem>,
+    execution_outcomes: Vec<CountItem>,
+    top_reasons: Vec<CountItem>,
+    horizons: Vec<CountItem>,
+    cities: Vec<CountItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct TradeView {
     id: String,
     ticker: String,
@@ -179,6 +203,7 @@ async fn main() -> Result<()> {
         .route("/api/health", get(health))
         .route("/api/trades", get(list_trades))
         .route("/api/summary", get(get_summary))
+        .route("/api/diagnostics", get(get_diagnostics))
         .route("/api/trades/:id", patch(update_trade))
         .nest_service("/", ServeDir::new(static_dir))
         .with_state(state);
@@ -214,6 +239,90 @@ async fn list_trades(
 ) -> Result<Json<DashboardResponse>, ApiError> {
     let dashboard = build_dashboard(&state, Some(query)).await?;
     Ok(Json(dashboard))
+}
+
+async fn get_diagnostics(
+    State(state): State<AppState>,
+) -> Result<Json<DiagnosticsResponse>, ApiError> {
+    let rows = load_all_rows(&state.decisions_dir, state.max_files).await?;
+    Ok(Json(build_diagnostics(rows)))
+}
+
+/// Count occurrences of `key` across rows, returned as a descending,
+/// stably-ordered list of `{key, count}` items. `limit == 0` keeps all.
+fn tally<I>(values: I, limit: usize) -> Vec<CountItem>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for value in values {
+        *counts.entry(value).or_insert(0) += 1;
+    }
+    let mut items: Vec<CountItem> = counts
+        .into_iter()
+        .map(|(key, count)| CountItem { key, count })
+        .collect();
+    // Highest count first; ties broken alphabetically (BTreeMap gave us a-z).
+    items.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.key.cmp(&b.key)));
+    if limit > 0 && items.len() > limit {
+        items.truncate(limit);
+    }
+    items
+}
+
+fn build_diagnostics(rows: Vec<DecisionRow>) -> DiagnosticsResponse {
+    let scanned_rows = rows.len();
+    let now = Utc::now();
+    let latest_decision_at = rows.iter().map(|r| r.ts).max();
+    let decisions_last_24h = rows
+        .iter()
+        .filter(|r| now.signed_duration_since(r.ts).num_hours() < 24)
+        .count();
+
+    let decisions = tally(rows.iter().map(|r| normalize_key(&r.decision)), 0);
+    let sigma_sources = tally(rows.iter().map(|r| normalize_key(&r.sigma_source)), 0);
+    let risk_outcomes = tally(
+        rows.iter()
+            .filter_map(|r| r.risk_outcome.as_deref().map(normalize_key)),
+        0,
+    );
+    let execution_outcomes = tally(
+        rows.iter()
+            .filter_map(|r| r.execution_outcome.as_deref().map(normalize_key)),
+        0,
+    );
+    let top_reasons = tally(
+        rows.iter()
+            .filter_map(|r| r.reason.as_deref().map(normalize_key)),
+        8,
+    );
+    let horizons = tally(rows.iter().map(|r| format!("{}d", r.horizon_days)), 0);
+    let cities = tally(rows.iter().map(|r| r.city.clone()), 0);
+
+    DiagnosticsResponse {
+        generated_at: now,
+        scanned_rows,
+        latest_decision_at,
+        decisions_last_24h,
+        decisions,
+        sigma_sources,
+        risk_outcomes,
+        execution_outcomes,
+        top_reasons,
+        horizons,
+        cities,
+    }
+}
+
+/// Normalize a tag for display: trim, lowercase, collapse to a stable key.
+/// Empty strings become `"unknown"` so they still surface in the tally.
+fn normalize_key(raw: &str) -> String {
+    let trimmed = raw.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        "unknown".to_string()
+    } else {
+        trimmed
+    }
 }
 
 async fn update_trade(
@@ -375,7 +484,9 @@ fn summarize(trades: &[TradeView]) -> TradeSummary {
     summary
 }
 
-async fn load_trade_rows(
+/// Read every decision row across the most-recent `max_files` JSONL files,
+/// sorted by timestamp. No decision-type filtering — callers narrow as needed.
+async fn load_all_rows(
     decisions_dir: &FsPath,
     max_files: usize,
 ) -> Result<Vec<DecisionRow>, ApiError> {
@@ -405,8 +516,16 @@ async fn load_trade_rows(
         }
     }
 
-    rows.retain(|row| row.decision.eq_ignore_ascii_case("trade"));
     rows.sort_by_key(|row| row.ts);
+    Ok(rows)
+}
+
+async fn load_trade_rows(
+    decisions_dir: &FsPath,
+    max_files: usize,
+) -> Result<Vec<DecisionRow>, ApiError> {
+    let mut rows = load_all_rows(decisions_dir, max_files).await?;
+    rows.retain(|row| row.decision.eq_ignore_ascii_case("trade"));
     Ok(rows)
 }
 

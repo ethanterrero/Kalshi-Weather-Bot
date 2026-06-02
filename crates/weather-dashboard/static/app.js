@@ -6,6 +6,15 @@
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
+// Base for "view this market on Kalshi" links. Kalshi market pages live at
+// kalshi.com/markets/<ticker>; adjust if your tickers need a different path.
+const KALSHI_BASE = "https://kalshi.com/markets/";
+const kalshiUrl = (ticker) =>
+  KALSHI_BASE + encodeURIComponent(String(ticker || "").toLowerCase());
+
+const EXT_ARROW =
+  '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M9 7h8v8"/></svg>';
+
 const els = {
   refreshBtn: document.getElementById("refreshBtn"),
   statusChip: document.getElementById("statusChip"),
@@ -149,7 +158,8 @@ function renderLatest(trades) {
   )[0];
   const side = (t.side || "").toUpperCase();
   els.latestBody.innerHTML =
-    `<span class="mono">${escapeHtml(t.ticker)}</span> · ${escapeHtml(t.city)} — ` +
+    `<a class="latest-link mono" href="${kalshiUrl(t.ticker)}" target="_blank" rel="noopener noreferrer" title="View this market on Kalshi">${escapeHtml(t.ticker)}${EXT_ARROW}</a>` +
+    ` · ${escapeHtml(t.city)} — ` +
     `${side} model ${pct(t.model_p_yes)} vs market ${pct(t.market_p_implied)} · ` +
     `edge ${signedPts(t.raw_edge)} · ${timeAgo(t.last_seen)}`;
 }
@@ -348,7 +358,8 @@ function buildRow(t) {
   badge.textContent = (t.side || "—").toUpperCase();
   badge.classList.add(sideClass(t.side));
 
-  row.querySelector(".ticker").textContent = t.ticker;
+  row.querySelector(".ticker").innerHTML =
+    `<a href="${kalshiUrl(t.ticker)}" target="_blank" rel="noopener noreferrer" title="View this market on Kalshi">${escapeHtml(t.ticker)}</a>`;
   row.querySelector(".trade-meta").textContent =
     `${t.city} · resolves ${t.resolution_date} · ${timeAgo(t.last_seen)}` +
     (t.emissions > 1 ? ` · ${t.emissions}× seen` : "");

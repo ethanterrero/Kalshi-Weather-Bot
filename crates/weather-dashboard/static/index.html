@@ -174,29 +174,62 @@
           </article>
         </section>
 
-        <!-- recent activity -->
-        <section class="panel" id="activity">
+        <!-- recent trades preview -->
+        <section class="panel">
           <div class="panel-head panel-head-stack">
             <div>
-              <h2>Recent activity</h2>
-              <p class="muted" id="activityCount">– events</p>
+              <h2>Recent trades</h2>
+              <p class="muted" id="previewCount">– latest</p>
             </div>
-            <div class="toolbar">
-              <div class="search">
-                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
-                <input id="searchInput" type="search" placeholder="Search ticker, city, side…" />
-              </div>
-              <div class="segmented" id="statusFilter" role="tablist">
-                <button class="seg is-active" data-status="">All</button>
-                <button class="seg" data-status="held">Held</button>
-                <button class="seg" data-status="closed">Closed</button>
-                <button class="seg" data-status="watch">Watch</button>
-              </div>
-            </div>
+            <button class="link-btn" id="viewAllTrades" type="button">View all trades →</button>
           </div>
-          <div class="feed" id="feed"></div>
+          <div class="feed" id="feedPreview"></div>
         </section>
         </div><!-- /view-overview -->
+
+        <!-- ============ TRADES VIEW ============ -->
+        <div class="view" id="view-trades" hidden>
+          <section class="panel">
+            <div class="panel-head panel-head-stack">
+              <div>
+                <h2>All trades</h2>
+                <p class="muted" id="tradesViewCount">– opportunities</p>
+              </div>
+              <div class="toolbar">
+                <div class="search">
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
+                  <input id="searchInput" type="search" placeholder="Search ticker, city, side…" />
+                </div>
+                <div class="segmented" id="statusFilter" role="tablist">
+                  <button class="seg is-active" data-status="">All</button>
+                  <button class="seg" data-status="held">Held</button>
+                  <button class="seg" data-status="closed">Closed</button>
+                  <button class="seg" data-status="watch">Watch</button>
+                </div>
+              </div>
+            </div>
+            <div class="feed" id="feed"></div>
+          </section>
+        </div><!-- /view-trades -->
+
+        <!-- ============ ACTIVITY VIEW ============ -->
+        <div class="view" id="view-activity" hidden>
+          <section class="panel">
+            <div class="panel-head panel-head-stack">
+              <div>
+                <h2>Decision stream</h2>
+                <p class="muted" id="activityViewCount">– decisions</p>
+              </div>
+              <div class="segmented" id="activityFilter" role="tablist">
+                <button class="seg is-active" data-decision="">All</button>
+                <button class="seg" data-decision="trade">Trade</button>
+                <button class="seg" data-decision="no_trade">No-trade</button>
+                <button class="seg" data-decision="blocked">Blocked</button>
+              </div>
+            </div>
+            <div class="stream" id="activityFeed"></div>
+          </section>
+        </div><!-- /view-activity -->
 
         <!-- ============ DIAGNOSTICS VIEW ============ -->
         <div class="view" id="view-diagnostics" hidden>

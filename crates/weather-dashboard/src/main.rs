@@ -151,6 +151,44 @@ struct TradesQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct ActivityQuery {
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ActivityResponse {
+    generated_at: DateTime<Utc>,
+    /// Total decision rows in the scanned window (before the `limit`).
+    total: usize,
+    rows: Vec<ActivityRow>,
+}
+
+/// One raw decision as it was logged — newest first, every decision type
+/// (`trade`, `no_trade`, `blocked`, …), not deduped into opportunities.
+#[derive(Debug, Clone, Serialize)]
+struct ActivityRow {
+    ts: DateTime<Utc>,
+    ticker: String,
+    city: String,
+    decision: String,
+    reason: Option<String>,
+    side: Option<String>,
+    model_p_yes: Decimal,
+    market_p_implied: Option<Decimal>,
+    raw_edge: Option<Decimal>,
+    contracts: Option<u32>,
+    limit_price: Option<Decimal>,
+    forecast_temp_f: i32,
+    strike_temperature_f: i32,
+    stat: String,
+    sigma_source: String,
+    risk_outcome: Option<String>,
+    execution_outcome: Option<String>,
+    resolution_date: NaiveDate,
+    horizon_days: i64,
+}
+
+#[derive(Debug, Deserialize)]
 struct UpdateTradePayload {
     status: Option<TradeStatus>,
     notes: Option<String>,
@@ -215,6 +253,7 @@ async fn main() -> Result<()> {
         .route("/api/trades", get(list_trades))
         .route("/api/summary", get(get_summary))
         .route("/api/diagnostics", get(get_diagnostics))
+        .route("/api/activity", get(get_activity))
         .route("/api/config", get(get_config))
         .route("/api/trades/:id", patch(update_trade))
         .nest_service("/", ServeDir::new(static_dir))
@@ -273,6 +312,46 @@ async fn get_diagnostics(
 ) -> Result<Json<DiagnosticsResponse>, ApiError> {
     let rows = load_all_rows(&state.decisions_dir, state.max_files).await?;
     Ok(Json(build_diagnostics(rows)))
+}
+
+async fn get_activity(
+    State(state): State<AppState>,
+    Query(query): Query<ActivityQuery>,
+) -> Result<Json<ActivityResponse>, ApiError> {
+    let mut rows = load_all_rows(&state.decisions_dir, state.max_files).await?;
+    let total = rows.len();
+    rows.reverse(); // newest first
+    let limit = query.limit.unwrap_or(150).min(1000);
+    let activity = rows.into_iter().take(limit).map(activity_from).collect();
+    Ok(Json(ActivityResponse {
+        generated_at: Utc::now(),
+        total,
+        rows: activity,
+    }))
+}
+
+fn activity_from(row: DecisionRow) -> ActivityRow {
+    ActivityRow {
+        ts: row.ts,
+        ticker: row.ticker,
+        city: row.city,
+        decision: row.decision,
+        reason: row.reason,
+        side: row.side,
+        model_p_yes: row.model_p_yes,
+        market_p_implied: row.market_p_implied,
+        raw_edge: row.raw_edge,
+        contracts: row.contracts,
+        limit_price: row.limit_price,
+        forecast_temp_f: row.forecast_temp_f,
+        strike_temperature_f: row.strike_temperature_f,
+        stat: stat_short(row.stat),
+        sigma_source: row.sigma_source,
+        risk_outcome: row.risk_outcome,
+        execution_outcome: row.execution_outcome,
+        resolution_date: row.resolution_date,
+        horizon_days: row.horizon_days,
+    }
 }
 
 /// Count occurrences of `key` across rows, returned as a descending,

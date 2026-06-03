@@ -32,7 +32,13 @@ const els = {
   cityChart: document.getElementById("cityChart"),
   cityTotal: document.getElementById("cityTotal"),
   feed: document.getElementById("feed"),
-  activityCount: document.getElementById("activityCount"),
+  tradesViewCount: document.getElementById("tradesViewCount"),
+  feedPreview: document.getElementById("feedPreview"),
+  previewCount: document.getElementById("previewCount"),
+  viewAllTrades: document.getElementById("viewAllTrades"),
+  activityFeed: document.getElementById("activityFeed"),
+  activityViewCount: document.getElementById("activityViewCount"),
+  activityFilter: document.getElementById("activityFilter"),
   navTradesCount: document.getElementById("navTradesCount"),
   navActivityCount: document.getElementById("navActivityCount"),
   searchInput: document.getElementById("searchInput"),
@@ -69,8 +75,8 @@ const els = {
 
 const VIEWS = {
   overview: { title: "Overview", subtitle: "live KPIs · edge curve · recent activity", el: "view-overview" },
-  trades: { title: "Trades", subtitle: "all logged opportunities", el: "view-overview", scrollTo: "activity" },
-  activity: { title: "Activity", subtitle: "recent decision stream", el: "view-overview", scrollTo: "activity" },
+  trades: { title: "Trades", subtitle: "all logged trade opportunities", el: "view-trades" },
+  activity: { title: "Activity", subtitle: "raw decision stream — every pass", el: "view-activity", activity: true },
   map: { title: "Weather Map", subtitle: "traded markets by location · edge & activity", el: "view-map", map: true },
   diagnostics: { title: "Diagnostics", subtitle: "pipeline health · decision mix · risk", el: "view-diagnostics", diag: true },
 };
@@ -80,6 +86,9 @@ const state = {
   trades: [],
   search: "",
   status: "",
+  activityRows: [],
+  activityTotal: 0,
+  activityDecision: "",
 };
 
 /* ---------- formatters ---------- */
@@ -385,7 +394,7 @@ function sideClass(side) {
   return "side-unknown";
 }
 
-function buildRow(t) {
+function buildRow(t, opts = {}) {
   const frag = els.rowTemplate.content.cloneNode(true);
   const row = frag.querySelector(".trade");
   row.dataset.id = t.id;
@@ -424,6 +433,13 @@ function buildRow(t) {
   const statusSelect = row.querySelector(".statusSelect");
   const notesInput = row.querySelector(".notesInput");
   const saveBtn = row.querySelector(".saveBtn");
+
+  if (opts.preview) {
+    // read-only on the Overview preview — drop the inline editor
+    editToggle.remove();
+    editPanel.remove();
+    return frag;
+  }
 
   statusSelect.value = t.status;
   notesInput.value = t.notes || "";
@@ -464,7 +480,7 @@ function buildRow(t) {
 
 function renderFeed() {
   const list = filteredTrades();
-  els.activityCount.textContent = `${list.length} of ${state.trades.length} events`;
+  els.tradesViewCount.textContent = `${list.length} of ${state.trades.length} trades`;
   els.feed.innerHTML = "";
   if (!list.length) {
     els.feed.innerHTML = '<div class="chart-empty">No matching trades.</div>';
@@ -473,6 +489,83 @@ function renderFeed() {
   const frag = document.createDocumentFragment();
   for (const t of list) frag.appendChild(buildRow(t));
   els.feed.appendChild(frag);
+}
+
+// Compact, read-only preview of the most recent trades on the Overview.
+function renderFeedPreview() {
+  const list = [...state.trades]
+    .sort((a, b) => new Date(b.last_seen) - new Date(a.last_seen))
+    .slice(0, 6);
+  els.previewCount.textContent = `${Math.min(6, state.trades.length)} latest · ${state.trades.length} total`;
+  els.feedPreview.innerHTML = "";
+  if (!list.length) {
+    els.feedPreview.innerHTML = '<div class="chart-empty">No trades yet.</div>';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const t of list) frag.appendChild(buildRow(t, { preview: true }));
+  els.feedPreview.appendChild(frag);
+}
+
+/* ---------- activity (raw decision stream) ---------- */
+function decisionBadge(d) {
+  const map = {
+    trade: ["TRADE", "dec-trade"],
+    no_trade: ["NO-TRADE", "dec-notrade"],
+    blocked: ["BLOCKED", "dec-blocked"],
+  };
+  return map[d] || [String(d || "?").toUpperCase().replace(/_/g, "-"), "dec-other"];
+}
+
+function buildActivityRow(r) {
+  const el = document.createElement("div");
+  el.className = "stream-row";
+  const [label, cls] = decisionBadge(r.decision);
+  const temp = r.forecast_temp_f != null ? `${r.forecast_temp_f}°${r.stat === "low" ? "L" : "H"}` : "–";
+  const edgeCls = r.raw_edge != null ? (Number(r.raw_edge) >= 0 ? "pos" : "neg") : "";
+  el.innerHTML =
+    `<span class="dec-badge ${cls}">${label}</span>` +
+    `<div class="stream-main">` +
+    `<a class="mono stream-ticker" href="${kalshiUrl(r.ticker)}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.ticker)}</a>` +
+    `<span class="stream-meta muted">${escapeHtml(r.city)}${r.reason ? " · " + escapeHtml(r.reason) : ""}</span></div>` +
+    `<div class="stream-stats">` +
+    `<span class="s"><span class="sk">temp</span><span class="sv mono">${temp}</span></span>` +
+    `<span class="s"><span class="sk">model</span><span class="sv mono">${pct(r.model_p_yes)}</span></span>` +
+    `<span class="s"><span class="sk">mkt</span><span class="sv mono">${pct(r.market_p_implied)}</span></span>` +
+    `<span class="s"><span class="sk">edge</span><span class="sv mono ${edgeCls}">${signedPts(r.raw_edge)}</span></span>` +
+    `</div>` +
+    `<span class="stream-time muted">${timeAgo(r.ts)}</span>`;
+  return el;
+}
+
+function drawActivity() {
+  const rows = (state.activityRows || []).filter(
+    (r) => !state.activityDecision || r.decision === state.activityDecision
+  );
+  els.activityViewCount.textContent = `${rows.length} of ${state.activityTotal || 0} decisions`;
+  els.activityFeed.innerHTML = "";
+  if (!rows.length) {
+    els.activityFeed.innerHTML = '<div class="chart-empty">No decisions match.</div>';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const r of rows) frag.appendChild(buildActivityRow(r));
+  els.activityFeed.appendChild(frag);
+}
+
+async function renderActivity() {
+  try {
+    const res = await fetch("/api/activity?limit=200");
+    if (!res.ok) throw new Error(`activity ${res.status}`);
+    const data = await res.json();
+    state.activityRows = data.rows || [];
+    state.activityTotal = data.total || state.activityRows.length;
+  } catch (err) {
+    console.error(err);
+    els.activityFeed.innerHTML = '<div class="chart-empty">Failed to load the decision stream.</div>';
+    return;
+  }
+  drawActivity();
 }
 
 /* ---------- weather map (Leaflet) ---------- */
@@ -719,6 +812,7 @@ function renderAll() {
   renderCurve(state.trades);
   renderCityBars(state.trades);
   renderFeed();
+  renderFeedPreview();
 }
 
 async function refresh() {
@@ -729,6 +823,7 @@ async function refresh() {
     renderAll();
     if (activeView === "diagnostics") refreshDiagnostics();
     if (activeView === "map") renderMap();
+    if (activeView === "activity") renderActivity();
   } catch (err) {
     console.error(err);
     setOnline(false);
@@ -762,6 +857,15 @@ els.statusFilter.addEventListener("click", (e) => {
   state.status = btn.dataset.status || "";
   renderFeed();
 });
+els.viewAllTrades.addEventListener("click", () => switchView("trades"));
+els.activityFilter.addEventListener("click", (e) => {
+  const btn = e.target.closest(".seg");
+  if (!btn) return;
+  els.activityFilter.querySelectorAll(".seg").forEach((b) => b.classList.remove("is-active"));
+  btn.classList.add("is-active");
+  state.activityDecision = btn.dataset.decision || "";
+  drawActivity();
+});
 
 // sidebar nav — switch between Overview and Diagnostics views
 function switchView(section) {
@@ -779,12 +883,8 @@ function switchView(section) {
 
   if (cfg.diag) refreshDiagnostics();
   if (cfg.map) renderMap();
-  if (cfg.scrollTo) {
-    const target = document.getElementById(cfg.scrollTo);
-    if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
-  } else {
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }
+  if (cfg.activity) renderActivity();
+  window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 document.querySelectorAll(".nav-item").forEach((item) => {

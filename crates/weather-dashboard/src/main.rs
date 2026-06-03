@@ -17,6 +17,7 @@ use tokio::sync::RwLock;
 use tower_http::services::ServeDir;
 use tracing::{info, warn};
 use weather_backtest::{read_decisions, DecisionRow};
+use weather_types::TempStat;
 const TRADE_CACHE_TTL_SECS: i64 = 15;
 
 #[derive(Debug, Parser)]
@@ -133,6 +134,12 @@ struct TradeView {
     market_p_implied: Option<Decimal>,
     raw_edge: Option<Decimal>,
     net_ev_per_contract: Option<Decimal>,
+    /// Latest forecast temperature (°F) the model used for this market.
+    forecast_temp_f: i32,
+    /// Market strike temperature (°F).
+    strike_temperature_f: i32,
+    /// `"high"` or `"low"` — which daily statistic the market settles on.
+    stat: String,
     notes: String,
     updated_at: Option<DateTime<Utc>>,
 }
@@ -177,6 +184,9 @@ struct TradeAggregate {
     market_p_implied: Option<Decimal>,
     raw_edge: Option<Decimal>,
     net_ev_per_contract: Option<Decimal>,
+    forecast_temp_f: i32,
+    strike_temperature_f: i32,
+    stat: String,
 }
 
 #[derive(Debug, Clone)]
@@ -205,6 +215,7 @@ async fn main() -> Result<()> {
         .route("/api/trades", get(list_trades))
         .route("/api/summary", get(get_summary))
         .route("/api/diagnostics", get(get_diagnostics))
+        .route("/api/config", get(get_config))
         .route("/api/trades/:id", patch(update_trade))
         .nest_service("/", ServeDir::new(static_dir))
         .with_state(state);
@@ -219,6 +230,21 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ConfigResponse {
+    /// OpenWeatherMap API key (from `OPENWEATHER_API_KEY`), if set. The map
+    /// uses it for the temperature tile overlay; `None` → basemap + markers
+    /// only. Served at runtime so the key never lives in committed assets.
+    owm_key: Option<String>,
+}
+
+async fn get_config() -> Json<ConfigResponse> {
+    let owm_key = std::env::var("OPENWEATHER_API_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty());
+    Json(ConfigResponse { owm_key })
 }
 
 async fn health() -> impl IntoResponse {
@@ -313,6 +339,15 @@ fn build_diagnostics(rows: Vec<DecisionRow>) -> DiagnosticsResponse {
         horizons,
         cities,
     }
+}
+
+/// Short label for the daily statistic a market settles on.
+fn stat_short(stat: TempStat) -> String {
+    match stat {
+        TempStat::DailyHigh => "high",
+        TempStat::DailyLow => "low",
+    }
+    .to_string()
 }
 
 /// Normalize a tag for display: trim, lowercase, collapse to a stable key.
@@ -413,6 +448,9 @@ async fn build_dashboard(
             market_p_implied: trade.market_p_implied,
             raw_edge: trade.raw_edge,
             net_ev_per_contract: trade.net_ev_per_contract,
+            forecast_temp_f: trade.forecast_temp_f,
+            strike_temperature_f: trade.strike_temperature_f,
+            stat: trade.stat,
             notes,
             updated_at,
         });
@@ -548,6 +586,9 @@ fn aggregate_trades(rows: Vec<DecisionRow>) -> Vec<TradeAggregate> {
             existing.raw_edge = row.raw_edge;
             existing.net_ev_per_contract = row.net_ev_per_contract;
             existing.sigma_source = row.sigma_source;
+            existing.forecast_temp_f = row.forecast_temp_f;
+            existing.strike_temperature_f = row.strike_temperature_f;
+            existing.stat = stat_short(row.stat);
             continue;
         }
 
@@ -571,6 +612,9 @@ fn aggregate_trades(rows: Vec<DecisionRow>) -> Vec<TradeAggregate> {
                 market_p_implied: row.market_p_implied,
                 raw_edge: row.raw_edge,
                 net_ev_per_contract: row.net_ev_per_contract,
+                forecast_temp_f: row.forecast_temp_f,
+                strike_temperature_f: row.strike_temperature_f,
+                stat: stat_short(row.stat),
             },
         );
     }

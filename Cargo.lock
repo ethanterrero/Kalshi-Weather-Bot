@@ -2936,6 +2936,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "weather-backtest",
+ "weather-types",
 ]
 
 [[package]]

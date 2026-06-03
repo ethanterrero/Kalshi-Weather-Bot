@@ -55,16 +55,16 @@ const els = {
   diagHorizons: document.getElementById("diagHorizons"),
   diagCities: document.getElementById("diagCities"),
   // weather map
-  mapArea: document.getElementById("mapArea"),
-  mapTip: document.getElementById("mapTip"),
+  mapLeaflet: document.getElementById("mapLeaflet"),
   mapCities: document.getElementById("mapCities"),
   mapCitiesSub: document.getElementById("mapCitiesSub"),
   mapTopCity: document.getElementById("mapTopCity"),
   mapTopCitySub: document.getElementById("mapTopCitySub"),
-  mapBestEdge: document.getElementById("mapBestEdge"),
-  mapBestEdgeSub: document.getElementById("mapBestEdgeSub"),
+  mapHot: document.getElementById("mapHot"),
+  mapHotSub: document.getElementById("mapHotSub"),
   mapNetPnl: document.getElementById("mapNetPnl"),
   mapNote: document.getElementById("mapNote"),
+  tempScale: document.getElementById("tempScale"),
 };
 
 const VIEWS = {
@@ -475,14 +475,46 @@ function renderFeed() {
   els.feed.appendChild(frag);
 }
 
-/* ---------- weather map ---------- */
-// Project a city name to [x, y] in the map's viewBox via the equirectangular
-// bounds in MAP_VIEW (from map-data.js). Returns null for unknown cities.
-function projCity(name) {
-  const c = typeof CITY_COORDS !== "undefined" && CITY_COORDS[String(name || "").toLowerCase()];
-  if (!c) return null;
-  const { w, h, W, E, N, S } = MAP_VIEW;
-  return [((c[1] - W) / (E - W)) * w, ((N - c[0]) / (N - S)) * h];
+/* ---------- weather map (Leaflet) ---------- */
+let leafletMap = null;
+let markerLayer = null;
+let owmKey; // undefined = not fetched, null = no key, string = key
+
+// Meteorological temperature scale (°F → color), interpolated between stops.
+const TEMP_STOPS = [
+  [10, [91, 45, 142]], [25, [59, 76, 192]], [38, [74, 144, 217]],
+  [50, [70, 193, 201]], [60, [79, 185, 107]], [70, [168, 210, 74]],
+  [80, [244, 196, 48]], [90, [240, 138, 36]], [100, [224, 73, 47]],
+  [110, [155, 28, 28]],
+];
+function tempColor(f) {
+  if (f == null || Number.isNaN(f)) return "#8595b4";
+  const t = Number(f);
+  if (t <= TEMP_STOPS[0][0]) return rgb(TEMP_STOPS[0][1]);
+  const last = TEMP_STOPS[TEMP_STOPS.length - 1];
+  if (t >= last[0]) return rgb(last[1]);
+  for (let i = 0; i < TEMP_STOPS.length - 1; i++) {
+    const [a, ca] = TEMP_STOPS[i];
+    const [b, cb] = TEMP_STOPS[i + 1];
+    if (t >= a && t <= b) {
+      const k = (t - a) / (b - a);
+      return rgb([0, 1, 2].map((j) => Math.round(ca[j] + (cb[j] - ca[j]) * k)));
+    }
+  }
+  return "#8595b4";
+}
+const rgb = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
+
+function renderTempScale() {
+  if (!els.tempScale || els.tempScale.dataset.done) return;
+  const grad = TEMP_STOPS.map(([f], i) => `${tempColor(f)} ${(i / (TEMP_STOPS.length - 1)) * 100}%`).join(", ");
+  els.tempScale.innerHTML =
+    `<span class="ts-min">10°</span><span class="ts-bar" style="background:linear-gradient(90deg, ${grad})"></span><span class="ts-max">110°</span>`;
+  els.tempScale.dataset.done = "1";
+}
+
+function cityCoords(name) {
+  return typeof CITY_COORDS !== "undefined" ? CITY_COORDS[String(name || "").toLowerCase()] : null;
 }
 
 function computeCityStats(trades) {
@@ -490,7 +522,8 @@ function computeCityStats(trades) {
   for (const t of trades) {
     let s = m.get(t.city);
     if (!s) {
-      s = { city: t.city, count: 0, contracts: 0, netEv: 0, edgeSum: 0, edgeN: 0, modelSum: 0, modelN: 0, held: 0, latest: t.last_seen };
+      s = { city: t.city, count: 0, contracts: 0, netEv: 0, edgeSum: 0, edgeN: 0, held: 0,
+            latest: t.last_seen, forecast: t.forecast_temp_f, strike: t.strike_temperature_f, stat: t.stat };
       m.set(t.city, s);
     }
     s.count++;
@@ -498,25 +531,60 @@ function computeCityStats(trades) {
     s.contracts += ct;
     if (t.net_ev_per_contract != null) s.netEv += Number(t.net_ev_per_contract) * ct;
     if (t.raw_edge != null) { s.edgeSum += Number(t.raw_edge); s.edgeN++; }
-    if (t.model_p_yes != null) { s.modelSum += Number(t.model_p_yes); s.modelN++; }
     if (t.status === "held") s.held++;
-    if (new Date(t.last_seen) > new Date(s.latest)) s.latest = t.last_seen;
+    if (new Date(t.last_seen) >= new Date(s.latest)) {
+      s.latest = t.last_seen;
+      s.forecast = t.forecast_temp_f;
+      s.strike = t.strike_temperature_f;
+      s.stat = t.stat;
+    }
   }
-  const arr = [...m.values()].map((s) => ({
+  return [...m.values()].map((s) => ({
     ...s,
     avgEdge: s.edgeN ? s.edgeSum / s.edgeN : null,
-    avgModel: s.modelN ? s.modelSum / s.modelN : null,
-    xy: projCity(s.city),
-  }));
-  arr.sort((a, b) => b.count - a.count);
-  return arr;
+    coords: cityCoords(s.city),
+  })).sort((a, b) => b.count - a.count);
 }
 
-function renderMap() {
-  if (typeof US_PATH === "undefined") return; // map-data.js not loaded
+async function ensureConfig() {
+  if (owmKey !== undefined) return;
+  try {
+    const res = await fetch("/api/config");
+    owmKey = res.ok ? (await res.json()).owm_key || null : null;
+  } catch {
+    owmKey = null;
+  }
+}
+
+async function renderMap() {
+  renderTempScale();
+  if (typeof L === "undefined") {
+    els.mapLeaflet.innerHTML = '<div class="chart-empty">Map library failed to load (offline?).</div>';
+    return;
+  }
+  await ensureConfig();
+
+  // init the Leaflet map once
+  if (!leafletMap) {
+    leafletMap = L.map(els.mapLeaflet, { zoomControl: true, scrollWheelZoom: false, attributionControl: true })
+      .setView([39.5, -96], 4);
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+      subdomains: "abcd", maxZoom: 10, minZoom: 3,
+      attribution: "&copy; OpenStreetMap &copy; CARTO",
+    }).addTo(leafletMap);
+    if (owmKey) {
+      L.tileLayer(`https://tile.openweathermap.org/map/temp_new/{z}/{x}/{y}.png?appid=${owmKey}`, {
+        opacity: 0.55, attribution: "&copy; OpenWeatherMap",
+      }).addTo(leafletMap);
+    }
+    setTimeout(() => leafletMap && leafletMap.invalidateSize(), 60);
+  } else {
+    setTimeout(() => leafletMap.invalidateSize(), 60);
+  }
+
   const stats = computeCityStats(state.trades);
-  const mapped = stats.filter((s) => s.xy);
-  const unmapped = stats.filter((s) => !s.xy);
+  const mapped = stats.filter((s) => s.coords);
+  const unmapped = stats.filter((s) => !s.coords);
 
   // KPIs
   els.mapCities.textContent = mapped.length;
@@ -524,60 +592,47 @@ function renderMap() {
   if (mapped.length) {
     els.mapTopCity.textContent = mapped[0].city;
     els.mapTopCitySub.textContent = `${mapped[0].count} trade${mapped[0].count === 1 ? "" : "s"}`;
-    const best = mapped.reduce((a, b) => ((b.avgEdge ?? -1) > (a.avgEdge ?? -1) ? b : a));
-    els.mapBestEdge.textContent = best.avgEdge != null ? `${signedPts(best.avgEdge)}` : "–";
-    els.mapBestEdgeSub.textContent = best.city;
+    const hot = mapped.reduce((a, b) => ((b.forecast ?? -999) > (a.forecast ?? -999) ? b : a));
+    els.mapHot.textContent = hot.forecast != null ? `${hot.forecast}°` : "–";
+    els.mapHotSub.textContent = hot.city;
   } else {
     els.mapTopCity.textContent = "–";
-    els.mapBestEdge.textContent = "–";
+    els.mapHot.textContent = "–";
   }
   const netPnl = mapped.reduce((sum, s) => sum + s.netEv, 0);
   els.mapNetPnl.textContent = usd(netPnl);
   els.mapNetPnl.classList.toggle("pos", netPnl > 0);
   els.mapNetPnl.classList.toggle("neg", netPnl < 0);
 
-  els.mapNote.textContent = unmapped.length
-    ? `${unmapped.length} city${unmapped.length === 1 ? "" : "(s)"} without map coordinates: ${unmapped.map((s) => s.city).join(", ")}`
-    : "";
+  const notes = [];
+  if (!owmKey) notes.push("Set OPENWEATHER_API_KEY to enable the live temperature overlay.");
+  if (unmapped.length) notes.push(`${unmapped.length} city without coordinates: ${unmapped.map((s) => s.city).join(", ")}.`);
+  els.mapNote.textContent = notes.join(" ");
 
-  // SVG
+  // markers
+  if (markerLayer) leafletMap.removeLayer(markerLayer);
+  markerLayer = L.layerGroup();
   const maxCount = Math.max(...mapped.map((s) => s.count), 1);
-  const markers = mapped
-    .map((s, i) => {
-      const [x, y] = s.xy;
-      const r = (6 + (s.count / maxCount) * 13).toFixed(1);
-      const color = s.netEv >= 0 ? "var(--green)" : "var(--red)";
-      const ring = s.held > 0 ? `<circle cx="${x}" cy="${y}" r="${(+r + 5).toFixed(1)}" class="map-ring" />` : "";
-      return `${ring}<circle class="map-marker" data-i="${i}" cx="${x}" cy="${y}" r="${r}" fill="${color}" fill-opacity="0.6" stroke="${color}" stroke-width="1.6" />`;
+  for (const s of mapped) {
+    const [lat, lon] = s.coords;
+    const r = 7 + (s.count / maxCount) * 12;
+    const color = tempColor(s.forecast);
+    L.circleMarker([lat, lon], {
+      radius: r, color: s.held ? "#ffffff" : color, weight: s.held ? 2 : 1.3,
+      fillColor: color, fillOpacity: 0.82,
     })
-    .join("");
-
-  els.mapArea.innerHTML =
-    `<svg viewBox="0 0 ${MAP_VIEW.w} ${MAP_VIEW.h}" role="img" aria-label="US map of traded markets">` +
-    `<path d="${US_PATH}" class="map-land" />${markers}</svg>`;
-
-  // tooltip
-  const wrap = els.mapTip.parentElement;
-  const showTip = (i, e) => {
-    const s = mapped[i];
-    els.mapTip.hidden = false;
-    els.mapTip.innerHTML =
-      `<strong>${escapeHtml(s.city)}</strong>` +
-      `<span>${s.count} trade${s.count === 1 ? "" : "s"} · ${s.contracts} contracts${s.held ? ` · ${s.held} open` : ""}</span>` +
-      `<span>avg edge ${signedPts(s.avgEdge)} · model ${pct(s.avgModel)}</span>` +
-      `<span class="${s.netEv >= 0 ? "pos" : "neg"}">exp P&L ${usd(s.netEv)}</span>`;
-    const rect = wrap.getBoundingClientRect();
-    let x = e.clientX - rect.left + 16;
-    let y = e.clientY - rect.top + 16;
-    x = Math.min(x, rect.width - 190);
-    els.mapTip.style.left = `${Math.max(8, x)}px`;
-    els.mapTip.style.top = `${Math.max(8, y)}px`;
-  };
-  els.mapArea.querySelectorAll(".map-marker").forEach((el) => {
-    el.addEventListener("mouseenter", (e) => showTip(+el.dataset.i, e));
-    el.addEventListener("mousemove", (e) => showTip(+el.dataset.i, e));
-    el.addEventListener("mouseleave", () => { els.mapTip.hidden = true; });
-  });
+      .bindTooltip(`${s.forecast != null ? s.forecast + "°" : "–"}`, {
+        permanent: true, direction: "right", className: "temp-label", offset: [r - 2, 0],
+      })
+      .bindPopup(
+        `<div class="map-pop"><strong>${escapeHtml(s.city)}</strong>` +
+        `<div class="map-pop-temp" style="color:${color}">${s.forecast != null ? s.forecast + "°F" : "–"} <span>${s.stat === "low" ? "daily low" : "daily high"} · strike ${s.strike}°</span></div>` +
+        `<div>${s.count} trade${s.count === 1 ? "" : "s"} · ${s.contracts} contracts${s.held ? ` · ${s.held} open` : ""}</div>` +
+        `<div>avg edge ${signedPts(s.avgEdge)} · <span class="${s.netEv >= 0 ? "pos" : "neg"}">exp P&L ${usd(s.netEv)}</span></div></div>`
+      )
+      .addTo(markerLayer);
+  }
+  markerLayer.addTo(leafletMap);
 }
 
 /* ---------- diagnostics ---------- */

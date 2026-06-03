@@ -10,6 +10,12 @@
       href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@300;400;500;600;700&display=swap"
       rel="stylesheet"
     />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -263,9 +269,9 @@
               <div class="kpi-sub muted" id="mapTopCitySub">most trades</div>
             </article>
             <article class="kpi">
-              <div class="kpi-head"><span class="kpi-label">Warmest edge</span></div>
-              <div class="kpi-value" id="mapBestEdge">–</div>
-              <div class="kpi-sub muted" id="mapBestEdgeSub">highest avg edge</div>
+              <div class="kpi-head"><span class="kpi-label">Hottest forecast</span></div>
+              <div class="kpi-value" id="mapHot">–</div>
+              <div class="kpi-sub muted" id="mapHotSub">peak forecast temp</div>
             </article>
             <article class="kpi kpi-accent">
               <div class="kpi-head"><span class="kpi-label">Net exp. P&amp;L</span></div>
@@ -278,18 +284,14 @@
             <div class="panel-head panel-head-stack">
               <div>
                 <h2>Markets by location</h2>
-                <p class="muted">bubble size = trade count · color = expected P&amp;L</p>
+                <p class="muted">forecast temperature · live conditions · bubble size = trade count</p>
               </div>
               <div class="map-legend">
-                <span class="lg"><span class="lg-dot" style="background:var(--green)"></span>profitable</span>
-                <span class="lg"><span class="lg-dot" style="background:var(--red)"></span>unprofitable</span>
+                <span class="lg-scale" id="tempScale"></span>
                 <span class="lg"><span class="lg-ring"></span>open position</span>
               </div>
             </div>
-            <div class="map-wrap">
-              <div class="map-area" id="mapArea"></div>
-              <div class="map-tip" id="mapTip" hidden></div>
-            </div>
+            <div class="leaflet-map" id="mapLeaflet"></div>
             <p class="muted map-note" id="mapNote"></p>
           </article>
         </div><!-- /view-map -->
@@ -335,6 +337,12 @@
       </article>
     </template>
 
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+      defer
+    ></script>
     <script src="/map-data.js" defer></script>
     <script src="/app.js" defer></script>
   </body>

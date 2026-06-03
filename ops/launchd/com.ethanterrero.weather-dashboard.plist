@@ -49,6 +49,10 @@
         <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
         <key>RUST_LOG</key>
         <string>info</string>
+        <!-- Optional: paste your OpenWeatherMap key here to enable the live
+             temperature overlay on the Weather Map. Leave empty to skip it. -->
+        <key>OPENWEATHER_API_KEY</key>
+        <string></string>
     </dict>
 
     <key>ProcessType</key>

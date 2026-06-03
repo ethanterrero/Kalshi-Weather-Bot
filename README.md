@@ -168,6 +168,8 @@ The dashboard reads `logs/decisions/*.jsonl` — **the same directory the bot wr
 
 By default it scans the 14 most recent per-day decision-log files (~2 weeks). Narrow it with `--max-files N` for faster refreshes, or widen it for deeper history.
 
+The **Weather Map** plots each traded market on a US map, colored by the forecast temperature the model used. Set `OPENWEATHER_API_KEY` (free tier; served to the browser at runtime via `/api/config`, never committed) to add a live nationwide temperature overlay on top of the basemap. Without it the map still renders the basemap and per-city forecast markers.
+
 **Run it alongside the bot (launchd).** A companion agent keeps the dashboard up on `:8787`, reading the live logs:
 
 ```bash

@@ -306,52 +306,63 @@ h2 { font-size: 0.95rem; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
 .chart-area svg { display: block; width: 100%; height: auto; overflow: visible; }
 .chart-empty { color: var(--faint); font-size: 0.82rem; text-align: center; padding: 36px 0; }
 
-/* ---------- weather map ---------- */
-.map-wrap { position: relative; }
-.map-area svg { display: block; width: 100%; height: auto; }
-.map-land {
-  fill: #18213a;
-  stroke: #33415f;
-  stroke-width: 0.8;
-  stroke-linejoin: round;
-}
-.map-marker { cursor: pointer; transition: fill-opacity 0.15s ease; }
-.map-marker:hover { fill-opacity: 0.9; }
-.map-ring {
-  fill: none;
-  stroke: var(--accent);
-  stroke-width: 1.4;
-  opacity: 0.7;
-  animation: mapPulse 2.4s ease-out infinite;
-}
-@keyframes mapPulse {
-  0% { opacity: 0.7; }
-  70% { opacity: 0.1; }
-  100% { opacity: 0.7; }
-}
-.map-tip {
-  position: absolute;
-  pointer-events: none;
-  z-index: 20;
-  min-width: 170px;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: rgba(12, 14, 20, 0.96);
+/* ---------- weather map (Leaflet) ---------- */
+.leaflet-map {
+  height: 540px;
+  width: 100%;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-  font-size: 0.76rem;
-  color: var(--muted);
+  background: #0c1018;
+  z-index: 0;
 }
-.map-tip strong { color: var(--text); font-size: 0.85rem; }
-.map-tip .pos { color: var(--green); }
-.map-tip .neg { color: var(--red); }
-.map-legend { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+/* dark-theme overrides for Leaflet chrome */
+.leaflet-container { background: #0c1018; font-family: var(--sans); }
+.leaflet-bar a,
+.leaflet-bar a:hover {
+  background: var(--card);
+  color: var(--text);
+  border-color: var(--border);
+}
+.leaflet-control-attribution {
+  background: rgba(10, 12, 18, 0.7) !important;
+  color: var(--faint) !important;
+}
+.leaflet-control-attribution a { color: var(--muted) !important; }
+/* permanent temperature labels next to markers */
+.temp-label.leaflet-tooltip {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9), 0 0 2px rgba(0, 0, 0, 0.9);
+  padding: 0;
+}
+.temp-label.leaflet-tooltip::before { display: none; }
+/* popups */
+.leaflet-popup-content-wrapper {
+  background: rgba(14, 16, 22, 0.97);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+}
+.leaflet-popup-tip { background: rgba(14, 16, 22, 0.97); border: 1px solid var(--border); }
+.leaflet-popup-content { margin: 11px 13px; font-size: 0.78rem; }
+.map-pop { display: flex; flex-direction: column; gap: 4px; }
+.map-pop strong { color: var(--text); font-size: 0.9rem; }
+.map-pop-temp { font-family: var(--mono); font-size: 1.05rem; font-weight: 600; }
+.map-pop-temp span { font-family: var(--sans); font-size: 0.7rem; color: var(--faint); font-weight: 400; }
+.map-pop .pos { color: var(--green); }
+.map-pop .neg { color: var(--red); }
+
+.map-legend { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
 .lg { display: inline-flex; align-items: center; gap: 6px; font-size: 0.74rem; color: var(--muted); }
-.lg-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
-.lg-ring { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid var(--accent); display: inline-block; }
+.lg-ring { width: 11px; height: 11px; border-radius: 50%; border: 2px solid #fff; display: inline-block; }
+.lg-scale { display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 0.68rem; color: var(--muted); }
+.ts-bar { width: 130px; height: 8px; border-radius: 4px; display: inline-block; }
 .map-note { margin: 12px 0 0; font-size: 0.74rem; }
 
 /* ---------- diagnostics ---------- */

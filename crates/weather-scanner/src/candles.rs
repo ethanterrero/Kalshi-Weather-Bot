@@ -145,18 +145,13 @@ where
     D: serde::Deserializer<'de>,
 {
     let raw = Option::<TradeOhlc>::deserialize(deserializer)?;
-    Ok(raw.and_then(|o| {
-        if o.open.is_none()
-            && o.high.is_none()
-            && o.low.is_none()
-            && o.close.is_none()
-            && o.mean.is_none()
-            && o.previous.is_none()
-        {
-            None
-        } else {
-            Some(o)
-        }
+    Ok(raw.filter(|o| {
+        o.open.is_some()
+            || o.high.is_some()
+            || o.low.is_some()
+            || o.close.is_some()
+            || o.mean.is_some()
+            || o.previous.is_some()
     }))
 }
 

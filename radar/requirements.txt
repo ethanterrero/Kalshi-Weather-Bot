@@ -1,0 +1,6 @@
+# Python 3.11+ (tested on 3.14)
+MetPy>=1.7
+cartopy>=0.24
+matplotlib>=3.9
+numpy>=2.0
+boto3>=1.35  # anonymous (unsigned) reads from the NOAA NEXRAD bucket on AWS Open Data
